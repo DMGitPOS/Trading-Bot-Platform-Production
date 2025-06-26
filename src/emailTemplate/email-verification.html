@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verify Your Email</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f4;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #ffffff;
+        }
+        .header {
+            text-align: center;
+            padding: 20px 0;
+            background-color: #4a90e2;
+            color: white;
+        }
+        .content {
+            padding: 20px;
+            color: #333333;
+        }
+        .button {
+            display: inline-block;
+            padding: 12px 24px;
+            background-color: #4a90e2;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .footer {
+            text-align: center;
+            padding: 20px;
+            font-size: 12px;
+            color: #666666;
+        }
+        @media only screen and (max-width: 600px) {
+            .container {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Verify Your Email</h1>
+        </div>
+        <div class="content">
+            <p>Hello,</p>
+            <p>Thank you for signing up! To complete your registration and start using our service, please verify your email address by clicking the button below:</p>
+            
+            <div style="text-align: center;">
+                <a href="{verificationUrl}" class="button">Verify Email Address</a>
+            </div>
+
+            <p>If the button above doesn't work, you can also copy and paste the following link into your browser:</p>
+            <p style="word-break: break-all; color: #4a90e2;">{verificationUrl}</p>
+
+            <p>This verification link will expire in 1 hour.</p>
+            
+            <p>If you didn't create an account, you can safely ignore this email.</p>
+        </div>
+        <div class="footer">
+            <p>This is an automated message, please do not reply to this email.</p>
+            <p>&copy; {year} TBot. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
