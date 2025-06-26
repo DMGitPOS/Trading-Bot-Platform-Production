@@ -12,7 +12,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const sendEmail = async (
   to: string,
   subject: string,
-  text: string
+  text: string,
 ): Promise<void> => {
   console.log(`Email to ${to}: ${subject}\n${text}`);
 };
@@ -34,7 +34,7 @@ export const register = async (req: Request, res: Response): Promise<void> => {
   });
   await user.save();
   const verificationLink = `${frontend}/auth/verify-email?email=${encodeURIComponent(email)}&token=${emailVerificationToken}`;
-  await sendVerificationEmail(email, verificationLink);
+  // await sendVerificationEmail(email, verificationLink);
   console.log(`Verification link: ${verificationLink}`);
   res
     .status(201)
