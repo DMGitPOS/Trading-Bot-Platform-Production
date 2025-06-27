@@ -3,9 +3,8 @@ import Bot from '../models/Bot';
 import User from '../models/User';
 import BotLog from '../models/BotLog';
 import ApiKey from '../models/ApiKey';
-import { fetchBinanceKlines } from '../services/binanceDataService';
 import { runMovingAverageBacktest, BacktestParams } from '../services/strategyEngine';
-import { Interval } from '@binance/connector-typescript';
+import { ExchangeFactory } from '../services/exchange/ExchangeFactory';
 
 export const createBot = async (req: Request, res: Response): Promise<void> => {
   const userId = (req.user as { id: string })?.id;
@@ -119,14 +118,21 @@ export const getBotPerformance = async (req: Request, res: Response): Promise<vo
 
 export const backtestBot = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { symbol, shortPeriod, longPeriod, quantity, initialBalance, interval, limit } = req.body;
+    const { symbol, shortPeriod, longPeriod, quantity, initialBalance, interval, limit, exchange = 'binance' } = req.body;
     // Validate input (add more as needed)
     if (!symbol || !shortPeriod || !longPeriod || !quantity || !initialBalance || !interval) {
       res.status(400).json({ message: 'Missing required parameters' });
       return;
     }
+    
+    // Create exchange service for backtesting (using public endpoints)
+    const exchangeService = ExchangeFactory.createExchange(exchange, {
+      apiKey: '',
+      apiSecret: ''
+    });
+    
     // Fetch historical data
-    const candles = await fetchBinanceKlines(symbol, interval as Interval, limit || 100);
+    const candles = await exchangeService.fetchKlines(symbol, interval, limit || 100);
     // Run backtest
     const params: BacktestParams = { symbol, shortPeriod, longPeriod, quantity, initialBalance };
     const result = runMovingAverageBacktest(candles, params);
