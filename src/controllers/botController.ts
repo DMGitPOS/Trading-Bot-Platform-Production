@@ -3,6 +3,9 @@ import Bot from '../models/Bot';
 import User from '../models/User';
 import BotLog from '../models/BotLog';
 import ApiKey from '../models/ApiKey';
+import { fetchBinanceKlines } from '../services/binanceDataService';
+import { runMovingAverageBacktest, BacktestParams } from '../services/strategyEngine';
+import { Interval } from '@binance/connector-typescript';
 
 export const createBot = async (req: Request, res: Response): Promise<void> => {
   const userId = (req.user as { id: string })?.id;
@@ -112,4 +115,24 @@ export const getBotPerformance = async (req: Request, res: Response): Promise<vo
     return;
   }
   res.json({ performance: bot.performance });
+};
+
+export const backtestBot = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { symbol, shortPeriod, longPeriod, quantity, initialBalance, interval, limit } = req.body;
+    // Validate input (add more as needed)
+    if (!symbol || !shortPeriod || !longPeriod || !quantity || !initialBalance || !interval) {
+      res.status(400).json({ message: 'Missing required parameters' });
+      return;
+    }
+    // Fetch historical data
+    const candles = await fetchBinanceKlines(symbol, interval as Interval, limit || 100);
+    // Run backtest
+    const params: BacktestParams = { symbol, shortPeriod, longPeriod, quantity, initialBalance };
+    const result = runMovingAverageBacktest(candles, params);
+    res.json(result);
+  } catch (error) {
+    console.error('Backtest error:', error);
+    res.status(500).json({ message: 'Backtest failed', error: (error as Error).message });
+  }
 }; 

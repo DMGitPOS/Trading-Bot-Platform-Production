@@ -29,7 +29,6 @@ export const addApiKey = async (req: Request, res: Response): Promise<void> => {
 };
 
 export const getApiKeys = async (req: Request, res: Response): Promise<void> => {
-  console.log('getApiKeys');
   try {
     const userId = (req.user as { id: string })?.id;
     if (!userId) {

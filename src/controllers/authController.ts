@@ -4,7 +4,7 @@ import jwt from "jsonwebtoken";
 import User from "../models/User";
 import crypto from "crypto";
 import Trade from "../models/Trade";
-import { sendVerificationEmail } from "../services/email.service";
+import { sendVerificationEmail } from "../services/email/email.service";
 
 const frontend = process.env.FRONTEND;
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
@@ -34,7 +34,7 @@ export const register = async (req: Request, res: Response): Promise<void> => {
   });
   await user.save();
   const verificationLink = `${frontend}/auth/verify-email?email=${encodeURIComponent(email)}&token=${emailVerificationToken}`;
-  // await sendVerificationEmail(email, verificationLink);
+  await sendVerificationEmail(email, verificationLink);
   console.log(`Verification link: ${verificationLink}`);
   res
     .status(201)
