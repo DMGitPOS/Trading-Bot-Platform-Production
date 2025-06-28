@@ -3,13 +3,14 @@ import Bot from '../models/Bot';
 import User from '../models/User';
 import BotLog from '../models/BotLog';
 import ApiKey from '../models/ApiKey';
+import PaperTrade from '../models/PaperTrade';
 import { runMovingAverageBacktest, BacktestParams } from '../services/strategyEngine';
 import { ExchangeFactory } from '../services/exchange/ExchangeFactory';
 import { startBotJob, stopBotJob } from '../services/botScheduler';
 
 export const createBot = async (req: Request, res: Response): Promise<void> => {
   const userId = (req.user as { id: string })?.id;
-  const { name, exchange, apiKeyRef, strategy } = req.body;
+  const { name, exchange, apiKeyRef, strategy, paperTrading, paperBalance, riskLimits } = req.body;
   
   // Validate strategy structure
   if (!strategy || !strategy.type || !strategy.parameters) {
@@ -50,6 +51,14 @@ export const createBot = async (req: Request, res: Response): Promise<void> => {
     exchange,
     apiKeyRef,
     strategy,
+    paperTrading: paperTrading !== undefined ? paperTrading : true, // Default to paper trading
+    paperBalance: paperBalance || 10000, // Default $10,000
+    riskLimits: {
+      maxDailyLoss: riskLimits?.maxDailyLoss || 500,
+      maxPositionSize: riskLimits?.maxPositionSize || 1000,
+      stopLoss: riskLimits?.stopLoss || 5,
+      takeProfit: riskLimits?.takeProfit || 10,
+    },
     status: 'stopped',
   });
   await bot.save();
@@ -65,7 +74,7 @@ export const listBots = async (req: Request, res: Response): Promise<void> => {
 export const updateBot = async (req: Request, res: Response): Promise<void> => {
   const userId = (req.user as { id: string })?.id;
   const botId = req.params.id;
-  const { name, strategy } = req.body;
+  const { name, strategy, paperTrading, paperBalance, riskLimits } = req.body;
   
   // Validate strategy structure if provided
   if (strategy) {
@@ -90,6 +99,39 @@ export const updateBot = async (req: Request, res: Response): Promise<void> => {
   }
   if (name) bot.name = name;
   if (strategy) bot.strategy = strategy;
+  if (paperTrading !== undefined) bot.paperTrading = paperTrading;
+  if (paperBalance !== undefined) bot.paperBalance = paperBalance;
+  if (riskLimits) {
+    bot.riskLimits = {
+      ...bot.riskLimits,
+      ...riskLimits,
+    };
+  }
+  await bot.save();
+  res.json({ bot });
+};
+
+export const updatePaperTradingConfig = async (req: Request, res: Response): Promise<void> => {
+  const userId = (req.user as { id: string })?.id;
+  const botId = req.params.id;
+  const { paperTrading, paperBalance, riskLimits } = req.body;
+  
+  const bot = await Bot.findOne({ _id: botId, user: userId });
+  if (!bot) {
+    res.status(404).json({ message: 'Bot not found' });
+    return;
+  }
+  
+  // Update paper trading settings
+  if (paperTrading !== undefined) bot.paperTrading = paperTrading;
+  if (paperBalance !== undefined) bot.paperBalance = paperBalance;
+  if (riskLimits) {
+    bot.riskLimits = {
+      ...bot.riskLimits,
+      ...riskLimits,
+    };
+  }
+  
   await bot.save();
   res.json({ bot });
 };
@@ -255,4 +297,96 @@ export const testBotRun = async (req: Request, res: Response): Promise<void> => 
     console.error('Test bot run error:', error);
     res.status(500).json({ message: 'Test run failed', error: (error as Error).message });
   }
+};
+
+export const getPaperTrades = async (req: Request, res: Response): Promise<void> => {
+  const userId = (req.user as { id: string })?.id;
+  const botId = req.params.id;
+  const bot = await Bot.findOne({ _id: botId, user: userId });
+  if (!bot) {
+    res.status(404).json({ message: 'Bot not found' });
+    return;
+  }
+  const trades = await PaperTrade.find({ bot: botId }).sort({ timestamp: -1 });
+  res.json({ trades });
+};
+
+export const getPaperTradingStats = async (req: Request, res: Response): Promise<void> => {
+  const userId = (req.user as { id: string })?.id;
+  const botId = req.params.id;
+  const bot = await Bot.findOne({ _id: botId, user: userId });
+  if (!bot) {
+    res.status(404).json({ message: 'Bot not found' });
+    return;
+  }
+
+  // Get recent paper trades
+  const recentTrades = await PaperTrade.find({ 
+    bot: botId,
+    timestamp: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } // Last 30 days
+  }).sort({ timestamp: -1 });
+
+  // Calculate statistics
+  let totalPnL = 0;
+  let wins = 0;
+  let totalTrades = 0;
+  let currentBalance = bot.paperBalance;
+
+  for (const trade of recentTrades) {
+    if (trade.side === 'sell' && trade.pnl !== undefined) {
+      totalPnL += trade.pnl;
+      totalTrades++;
+      if (trade.pnl > 0) wins++;
+    }
+    // Update current balance to the latest trade
+    if (trade.paperBalance !== undefined) {
+      currentBalance = trade.paperBalance;
+    }
+  }
+
+  const winRate = totalTrades > 0 ? wins / totalTrades : 0;
+  const initialBalance = 10000; // Default paper balance
+  const totalReturn = ((currentBalance - initialBalance) / initialBalance) * 100;
+
+  const stats = {
+    currentBalance,
+    totalPnL,
+    winRate,
+    totalTrades,
+    totalReturn,
+    riskLimits: bot.riskLimits,
+    paperTrading: bot.paperTrading,
+  };
+
+  res.json({ stats });
+};
+
+export const updateBotApiKey = async (req: Request, res: Response): Promise<void> => {
+  const userId = (req.user as { id: string })?.id;
+  const botId = req.params.id;
+  const { apiKeyRef } = req.body;
+  
+  if (!apiKeyRef) {
+    res.status(400).json({ message: 'API key reference is required' });
+    return;
+  }
+  
+  const bot = await Bot.findOne({ _id: botId, user: userId });
+  if (!bot) {
+    res.status(404).json({ message: 'Bot not found' });
+    return;
+  }
+  
+  // Verify the new API key exists and belongs to the user
+  const apiKey = await ApiKey.findOne({ _id: apiKeyRef, user: userId });
+  if (!apiKey) {
+    res.status(400).json({ message: 'Invalid API key reference' });
+    return;
+  }
+  
+  // Update the bot's API key reference
+  bot.apiKeyRef = apiKeyRef;
+  await bot.save();
+  
+  res.json({ bot });
 }; 

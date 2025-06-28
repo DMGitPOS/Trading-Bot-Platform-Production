@@ -66,8 +66,14 @@ A comprehensive, production-ready trading bot platform with **live trading capab
 ### **3. API Key Management**
 - **Secure storage**: AES-256 encryption for API credentials
 - **Exchange support**: Binance (extensible to other exchanges)
-- **Validation**: Real-time API key verification
+- **Real-time validation**: Tests API keys with exchanges before saving
+- **Format validation**: Basic length and format checks
+- **Account verification**: Checks trading permissions and account info
+- **Duplicate prevention**: One API key per exchange per user
 - **User isolation**: Secure key access per user
+- **Deletion protection**: Prevents deletion of keys in use by bots
+- **Usage tracking**: Shows which bots are using each API key
+- **Safe deletion**: Validates bot dependencies before allowing deletion
 
 ### **4. Trading Bot Engine**
 - **Strategy framework**: Modular, extensible strategy system
@@ -127,7 +133,8 @@ Subscription:
 API Keys:
   GET    /api/keys
   POST   /api/keys
-  PUT    /api/keys/:id
+  POST   /api/keys/test
+  GET    /api/keys/:id/usage
   DELETE /api/keys/:id
 
 Bots:
@@ -140,6 +147,7 @@ Bots:
   GET    /api/bots/:id/performance
   POST   /api/bots/:id/test
   POST   /api/bots/backtest
+  PUT    /api/bots/:id/api-key
 ```
 
 ### **Security Features**

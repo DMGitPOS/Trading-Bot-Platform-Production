@@ -2,20 +2,25 @@ import { IBot } from '../models/Bot';
 import { IApiKey } from '../models/ApiKey';
 import { ExchangeFactory } from './exchange/ExchangeFactory';
 import { decrypt } from '../utils/crypto';
+import { Candle } from './strategyEngine';
 import Trade from '../models/Trade';
+import PaperTrade from '../models/PaperTrade';
 import mongoose from 'mongoose';
 
 interface StrategyState {
   lastSignal: 'buy' | 'sell' | null;
   position: number;
   lastTradePrice: number | null;
+  paperBalance: number;
+  dailyPnL: number;
+  lastTradeDate: string | null;
 }
 
-// In-memory state tracking for each bot (in production, persist in DB)
+// In-memory state tracking for each bot (in production, persist in DB or use a distributed queue)
 const botStates: Record<string, StrategyState> = {};
 
 /**
- * Runs the bot's strategy using live exchange data and places real trades.
+ * Runs the bot's strategy using live exchange data and places real or paper trades.
  * @param bot Bot document
  * @param apiKey ApiKey document
  */
@@ -45,6 +50,9 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
       lastSignal: null,
       position: 0,
       lastTradePrice: null,
+      paperBalance: bot.paperBalance,
+      dailyPnL: 0,
+      lastTradeDate: null,
     };
   }
 
@@ -81,21 +89,35 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
       signal = 'sell';
     }
 
+    // Check risk limits before executing trades
+    if (!checkRiskLimits(bot, state, signal, currentPrice, quantity)) {
+      console.log(`Bot ${bot.name}: Risk limits exceeded, skipping trade`);
+      return;
+    }
+
     // Execute trades based on signals
     if (signal === 'buy' && state.position === 0) {
-      await executeBuyOrder(bot, exchangeService, symbol, quantity, currentPrice);
+      if (bot.paperTrading) {
+        await executePaperBuyOrder(bot, symbol, quantity, currentPrice, state);
+      } else {
+        await executeBuyOrder(bot, exchangeService, symbol, quantity, currentPrice);
+      }
       state.lastSignal = 'buy';
       state.position = quantity;
       state.lastTradePrice = currentPrice;
     } else if (signal === 'sell' && state.position > 0) {
-      await executeSellOrder(bot, exchangeService, symbol, state.position, currentPrice);
+      if (bot.paperTrading) {
+        await executePaperSellOrder(bot, symbol, state.position, currentPrice, state);
+      } else {
+        await executeSellOrder(bot, exchangeService, symbol, state.position, currentPrice);
+      }
       state.lastSignal = 'sell';
       state.position = 0;
       state.lastTradePrice = currentPrice;
     }
 
     // Update bot performance
-    await updateBotPerformance(bot, exchangeService);
+    await updateBotPerformance(bot, bot.paperTrading);
 
   } catch (error) {
     console.error(`Bot ${bot.name} execution error:`, error);
@@ -109,6 +131,51 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
 }
 
 /**
+ * Check risk limits before executing trades
+ */
+function checkRiskLimits(bot: IBot, state: StrategyState, signal: 'buy' | 'sell' | null, price: number, quantity: number): boolean {
+  const today = new Date().toDateString();
+  
+  // Reset daily PnL if it's a new day
+  if (state.lastTradeDate !== today) {
+    state.dailyPnL = 0;
+    state.lastTradeDate = today;
+  }
+
+  // Check max daily loss
+  if (state.dailyPnL <= -bot.riskLimits.maxDailyLoss) {
+    console.log(`Bot ${bot.name}: Daily loss limit exceeded (${state.dailyPnL})`);
+    return false;
+  }
+
+  // Check max position size
+  const positionValue = price * quantity;
+  if (positionValue > bot.riskLimits.maxPositionSize) {
+    console.log(`Bot ${bot.name}: Position size exceeds limit (${positionValue} > ${bot.riskLimits.maxPositionSize})`);
+    return false;
+  }
+
+  // Check stop loss and take profit for existing positions
+  if (signal === 'sell' && state.position > 0 && state.lastTradePrice) {
+    const priceChange = ((price - state.lastTradePrice) / state.lastTradePrice) * 100;
+    
+    // Stop loss check
+    if (priceChange <= -bot.riskLimits.stopLoss) {
+      console.log(`Bot ${bot.name}: Stop loss triggered (${priceChange.toFixed(2)}%)`);
+      return true; // Allow sell for stop loss
+    }
+    
+    // Take profit check
+    if (priceChange >= bot.riskLimits.takeProfit) {
+      console.log(`Bot ${bot.name}: Take profit triggered (${priceChange.toFixed(2)}%)`);
+      return true; // Allow sell for take profit
+    }
+  }
+
+  return true;
+}
+
+/**
  * Calculate Simple Moving Average
  */
 function calculateSMA(data: number[], period: number): number | null {
@@ -118,7 +185,97 @@ function calculateSMA(data: number[], period: number): number | null {
 }
 
 /**
- * Execute a buy order
+ * Execute a paper buy order
+ */
+async function executePaperBuyOrder(
+  bot: IBot, 
+  symbol: string, 
+  quantity: number, 
+  price: number,
+  state: StrategyState
+): Promise<void> {
+  try {
+    const tradeValue = price * quantity;
+    
+    // Check if we have enough paper balance
+    if (state.paperBalance < tradeValue) {
+      console.log(`Bot ${bot.name}: Insufficient paper balance (${state.paperBalance} < ${tradeValue})`);
+      return;
+    }
+
+    // Update paper balance
+    state.paperBalance -= tradeValue;
+
+    // Record the paper trade
+    await PaperTrade.create({
+      user: bot.user,
+      bot: bot._id as mongoose.Types.ObjectId,
+      symbol,
+      side: 'buy',
+      quantity,
+      price,
+      timestamp: new Date(),
+      status: 'filled',
+      exchange: bot.exchange,
+      paperBalance: state.paperBalance,
+      tradeType: 'paper',
+    });
+
+    console.log(`Bot ${bot.name}: PAPER BUY order executed - ${quantity} ${symbol} at ${price} (Balance: ${state.paperBalance})`);
+  } catch (error) {
+    console.error(`Bot ${bot.name}: Failed to execute PAPER BUY order:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Execute a paper sell order
+ */
+async function executePaperSellOrder(
+  bot: IBot, 
+  symbol: string, 
+  quantity: number, 
+  price: number,
+  state: StrategyState
+): Promise<void> {
+  try {
+    const tradeValue = price * quantity;
+    
+    // Update paper balance
+    state.paperBalance += tradeValue;
+
+    // Calculate PnL for this trade
+    let pnl = 0;
+    if (state.lastTradePrice) {
+      pnl = (price - state.lastTradePrice) * quantity;
+      state.dailyPnL += pnl;
+    }
+
+    // Record the paper trade
+    await PaperTrade.create({
+      user: bot.user,
+      bot: bot._id as mongoose.Types.ObjectId,
+      symbol,
+      side: 'sell',
+      quantity,
+      price,
+      timestamp: new Date(),
+      status: 'filled',
+      exchange: bot.exchange,
+      paperBalance: state.paperBalance,
+      tradeType: 'paper',
+      pnl,
+    });
+
+    console.log(`Bot ${bot.name}: PAPER SELL order executed - ${quantity} ${symbol} at ${price} (Balance: ${state.paperBalance}, PnL: ${pnl})`);
+  } catch (error) {
+    console.error(`Bot ${bot.name}: Failed to execute PAPER SELL order:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Execute a real buy order
  */
 async function executeBuyOrder(
   bot: IBot, 
@@ -149,15 +306,15 @@ async function executeBuyOrder(
       exchange: bot.exchange,
     });
 
-    console.log(`Bot ${bot.name}: BUY order executed - ${quantity} ${symbol} at ${order.price || price}`);
+    console.log(`Bot ${bot.name}: REAL BUY order executed - ${quantity} ${symbol} at ${order.price || price}`);
   } catch (error) {
-    console.error(`Bot ${bot.name}: Failed to execute BUY order:`, error);
+    console.error(`Bot ${bot.name}: Failed to execute REAL BUY order:`, error);
     throw error;
   }
 }
 
 /**
- * Execute a sell order
+ * Execute a real sell order
  */
 async function executeSellOrder(
   bot: IBot, 
@@ -188,9 +345,9 @@ async function executeSellOrder(
       exchange: bot.exchange,
     });
 
-    console.log(`Bot ${bot.name}: SELL order executed - ${quantity} ${symbol} at ${order.price || price}`);
+    console.log(`Bot ${bot.name}: REAL SELL order executed - ${quantity} ${symbol} at ${order.price || price}`);
   } catch (error) {
-    console.error(`Bot ${bot.name}: Failed to execute SELL order:`, error);
+    console.error(`Bot ${bot.name}: Failed to execute REAL SELL order:`, error);
     throw error;
   }
 }
@@ -198,13 +355,23 @@ async function executeSellOrder(
 /**
  * Update bot performance based on recent trades
  */
-async function updateBotPerformance(bot: IBot, exchangeService: any): Promise<void> {
+async function updateBotPerformance(bot: IBot, isPaperTrading: boolean): Promise<void> {
   try {
-    // Get recent trades for this bot
-    const recentTrades = await Trade.find({ 
-      bot: bot._id as mongoose.Types.ObjectId,
-      timestamp: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } // Last 30 days
-    }).sort({ timestamp: -1 });
+    let recentTrades;
+    
+    if (isPaperTrading) {
+      // Get recent paper trades for this bot
+      recentTrades = await PaperTrade.find({ 
+        bot: bot._id as mongoose.Types.ObjectId,
+        timestamp: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } // Last 30 days
+      }).sort({ timestamp: -1 });
+    } else {
+      // Get recent real trades for this bot
+      recentTrades = await Trade.find({ 
+        bot: bot._id as mongoose.Types.ObjectId,
+        timestamp: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } // Last 30 days
+      }).sort({ timestamp: -1 });
+    }
 
     if (recentTrades.length === 0) {
       return;
@@ -215,17 +382,30 @@ async function updateBotPerformance(bot: IBot, exchangeService: any): Promise<vo
     let wins = 0;
     let totalTrades = 0;
 
-    for (let i = 0; i < recentTrades.length - 1; i++) {
-      const buyTrade = recentTrades[i + 1];
-      const sellTrade = recentTrades[i];
+    if (isPaperTrading) {
+      // For paper trades, use the stored PnL
+      for (const trade of recentTrades) {
+        const paperTrade = trade as any; // Type assertion for paper trade
+        if (paperTrade.side === 'sell' && paperTrade.pnl !== undefined) {
+          totalPnL += paperTrade.pnl;
+          totalTrades++;
+          if (paperTrade.pnl > 0) wins++;
+        }
+      }
+    } else {
+      // For real trades, calculate PnL from buy/sell pairs
+      for (let i = 0; i < recentTrades.length - 1; i++) {
+        const buyTrade = recentTrades[i + 1];
+        const sellTrade = recentTrades[i];
 
-      if (buyTrade.side === 'buy' && sellTrade.side === 'sell') {
-        const tradePnL = (sellTrade.price - buyTrade.price) * buyTrade.quantity;
-        totalPnL += tradePnL;
-        totalTrades++;
+        if (buyTrade.side === 'buy' && sellTrade.side === 'sell') {
+          const tradePnL = (sellTrade.price - buyTrade.price) * buyTrade.quantity;
+          totalPnL += tradePnL;
+          totalTrades++;
 
-        if (tradePnL > 0) {
-          wins++;
+          if (tradePnL > 0) {
+            wins++;
+          }
         }
       }
     }

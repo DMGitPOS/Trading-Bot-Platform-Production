@@ -13,6 +13,15 @@ export interface IBot extends Document {
     tradeCount: number;
     lastTradeAt?: Date;
   };
+  // Paper trading configuration
+  paperTrading: boolean;
+  paperBalance: number;
+  riskLimits: {
+    maxDailyLoss: number;
+    maxPositionSize: number;
+    stopLoss: number; // percentage
+    takeProfit: number; // percentage
+  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -29,6 +38,15 @@ const BotSchema = new Schema<IBot>({
     winRate: { type: Number, default: 0 },
     tradeCount: { type: Number, default: 0 },
     lastTradeAt: { type: Date },
+  },
+  // Paper trading configuration
+  paperTrading: { type: Boolean, default: true }, // Default to paper trading for safety
+  paperBalance: { type: Number, default: 10000 }, // Default $10,000 paper balance
+  riskLimits: {
+    maxDailyLoss: { type: Number, default: 500 }, // $500 daily loss limit
+    maxPositionSize: { type: Number, default: 1000 }, // $1000 max position
+    stopLoss: { type: Number, default: 5 }, // 5% stop loss
+    takeProfit: { type: Number, default: 10 }, // 10% take profit
   },
 }, { timestamps: true });
 
