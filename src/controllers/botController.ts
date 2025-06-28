@@ -5,10 +5,26 @@ import BotLog from '../models/BotLog';
 import ApiKey from '../models/ApiKey';
 import { runMovingAverageBacktest, BacktestParams } from '../services/strategyEngine';
 import { ExchangeFactory } from '../services/exchange/ExchangeFactory';
+import { startBotJob, stopBotJob } from '../services/botScheduler';
 
 export const createBot = async (req: Request, res: Response): Promise<void> => {
   const userId = (req.user as { id: string })?.id;
   const { name, exchange, apiKeyRef, strategy } = req.body;
+  
+  // Validate strategy structure
+  if (!strategy || !strategy.type || !strategy.parameters) {
+    res.status(400).json({ message: 'Invalid strategy structure. Strategy must have type and parameters.' });
+    return;
+  }
+  
+  if (strategy.type === 'moving_average') {
+    const { symbol, shortPeriod, longPeriod, quantity } = strategy.parameters;
+    if (!symbol || !shortPeriod || !longPeriod || !quantity) {
+      res.status(400).json({ message: 'Missing required strategy parameters: symbol, shortPeriod, longPeriod, quantity' });
+      return;
+    }
+  }
+  
   const user = await User.findById(userId);
   if (!user) {
     res.status(404).json({ message: 'User not found' });
@@ -50,6 +66,23 @@ export const updateBot = async (req: Request, res: Response): Promise<void> => {
   const userId = (req.user as { id: string })?.id;
   const botId = req.params.id;
   const { name, strategy } = req.body;
+  
+  // Validate strategy structure if provided
+  if (strategy) {
+    if (!strategy.type || !strategy.parameters) {
+      res.status(400).json({ message: 'Invalid strategy structure. Strategy must have type and parameters.' });
+      return;
+    }
+    
+    if (strategy.type === 'moving_average') {
+      const { symbol, shortPeriod, longPeriod, quantity } = strategy.parameters;
+      if (!symbol || !shortPeriod || !longPeriod || !quantity) {
+        res.status(400).json({ message: 'Missing required strategy parameters: symbol, shortPeriod, longPeriod, quantity' });
+        return;
+      }
+    }
+  }
+  
   const bot = await Bot.findOne({ _id: botId, user: userId });
   if (!bot) {
     res.status(404).json({ message: 'Bot not found' });
@@ -64,12 +97,29 @@ export const updateBot = async (req: Request, res: Response): Promise<void> => {
 export const deleteBot = async (req: Request, res: Response): Promise<void> => {
   const userId = (req.user as { id: string })?.id;
   const botId = req.params.id;
-  const bot = await Bot.findOneAndDelete({ _id: botId, user: userId });
+  const bot = await Bot.findOne({ _id: botId, user: userId });
   if (!bot) {
     res.status(404).json({ message: 'Bot not found' });
     return;
   }
-  res.json({ message: 'Bot deleted' });
+  
+  try {
+    // Stop the bot job if it's running
+    if (bot.status === 'running') {
+      stopBotJob(botId);
+    }
+    
+    // Delete the bot
+    await Bot.findByIdAndDelete(botId);
+    
+    // Delete associated logs
+    await BotLog.deleteMany({ bot: botId });
+    
+    res.json({ message: 'Bot deleted' });
+  } catch (error) {
+    console.error('Error deleting bot:', error);
+    res.status(500).json({ message: 'Failed to delete bot', error: (error as Error).message });
+  }
 };
 
 export const toggleBot = async (req: Request, res: Response): Promise<void> => {
@@ -81,16 +131,53 @@ export const toggleBot = async (req: Request, res: Response): Promise<void> => {
     res.status(404).json({ message: 'Bot not found' });
     return;
   }
-  if (action === 'start') {
-    bot.status = 'running';
-  } else if (action === 'stop') {
-    bot.status = 'stopped';
-  } else {
-    res.status(400).json({ message: 'Invalid action' });
-    return;
+  
+  try {
+    if (action === 'start') {
+      // Start the bot scheduler
+      await startBotJob(botId);
+      bot.status = 'running';
+      
+      // Log the start action
+      await BotLog.create({
+        bot: bot._id,
+        timestamp: new Date(),
+        type: 'info',
+        message: 'Bot started successfully',
+      });
+    } else if (action === 'stop') {
+      // Stop the bot scheduler
+      stopBotJob(botId);
+      bot.status = 'stopped';
+      
+      // Log the stop action
+      await BotLog.create({
+        bot: bot._id,
+        timestamp: new Date(),
+        type: 'info',
+        message: 'Bot stopped successfully',
+      });
+    } else {
+      res.status(400).json({ message: 'Invalid action' });
+      return;
+    }
+    
+    await bot.save();
+    res.json({ bot });
+  } catch (error) {
+    console.error('Error toggling bot:', error);
+    
+    // Log the error
+    await BotLog.create({
+      bot: bot._id,
+      timestamp: new Date(),
+      type: 'error',
+      message: `Failed to ${action} bot`,
+      data: { error: (error as Error).message },
+    });
+    
+    res.status(500).json({ message: `Failed to ${action} bot`, error: (error as Error).message });
   }
-  await bot.save();
-  res.json({ bot });
 };
 
 export const getBotLogs = async (req: Request, res: Response): Promise<void> => {
@@ -140,5 +227,32 @@ export const backtestBot = async (req: Request, res: Response): Promise<void> =>
   } catch (error) {
     console.error('Backtest error:', error);
     res.status(500).json({ message: 'Backtest failed', error: (error as Error).message });
+  }
+};
+
+export const testBotRun = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = (req.user as { id: string })?.id;
+    const botId = req.params.id;
+    const bot = await Bot.findOne({ _id: botId, user: userId });
+    if (!bot) {
+      res.status(404).json({ message: 'Bot not found' });
+      return;
+    }
+    
+    const apiKey = await ApiKey.findById(bot.apiKeyRef);
+    if (!apiKey) {
+      res.status(400).json({ message: 'API key not found' });
+      return;
+    }
+    
+    // Import and run the bot
+    const { runBot } = await import('../services/botRunner');
+    await runBot(bot, apiKey);
+    
+    res.json({ message: 'Bot test run completed successfully' });
+  } catch (error) {
+    console.error('Test bot run error:', error);
+    res.status(500).json({ message: 'Test run failed', error: (error as Error).message });
   }
 }; 
