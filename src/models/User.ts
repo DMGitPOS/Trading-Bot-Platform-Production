@@ -9,6 +9,9 @@ export interface IUser extends Document {
   resetPasswordToken?: string;
   twoFAEnabled: boolean;
   twoFASecret?: string;
+  twoFAVerified: boolean;
+  backupCodes?: string[];
+  tempSecret?: string;  // Temporary secret during 2FA setup
   createdAt: Date;
   updatedAt: Date;
   googleId?: string;
@@ -26,6 +29,9 @@ const UserSchema: Schema = new Schema<IUser>({
   resetPasswordToken: { type: String },
   twoFAEnabled: { type: Boolean, default: false },
   twoFASecret: { type: String },
+  twoFAVerified: { type: Boolean, default: false },
+  backupCodes: [{ type: String }],
+  tempSecret: { type: String },  // Temporary secret during 2FA setup
   googleId: { type: String },
   subscriptionStatus: { type: String, default: 'inactive' },
   subscriptionPlan: { type: String, default: 'Free' },

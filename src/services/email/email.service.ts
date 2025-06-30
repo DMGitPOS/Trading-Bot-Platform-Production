@@ -10,7 +10,7 @@ interface TemplateData {
     year?: string | number;
 }
 
-const sendEmail = async (to: string, subject: string, htmlTemplate: string): Promise<void> => {
+export const sendEmail = async (to: string, subject: string, htmlTemplate: string): Promise<void> => {
     const transporter = nodemailer.createTransport({
         host: process.env.SMTP_HOST,
         port: Number(process.env.SMTP_PORT) || 465,
@@ -38,7 +38,7 @@ export const sendVerificationEmail = async (to: string, verificationUrl: string)
         
         const templateFilePath = path.join(
             __dirname,
-            "/../emailTemplate/email-verification.html"
+            "../../emailTemplate/email-verification.html"
         );
         const year = new Date().getFullYear();
         const htmlTemplate = getHtmlTemplateWithData(

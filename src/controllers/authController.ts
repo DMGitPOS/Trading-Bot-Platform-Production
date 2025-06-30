@@ -5,6 +5,7 @@ import User from "../models/User";
 import crypto from "crypto";
 import Trade from "../models/Trade";
 import { sendVerificationEmail } from "../services/email/email.service";
+import { TwoFactorAuthService } from "../services/2fa/twoFactorAuth.service";
 
 const frontend = process.env.FRONTEND;
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
@@ -42,36 +43,76 @@ export const register = async (req: Request, res: Response): Promise<void> => {
 };
 
 export const login = async (req: Request, res: Response): Promise<void> => {
-  const { email, password } = req.body;
-  const user = await User.findOne({ email });
-  if (!user || !user.password) {
-    res.status(400).json({ message: "Invalid credentials" });
-    return;
+  console.log('here');
+  try {
+    const { email, password, twoFAToken } = req.body;
+    const user = await User.findOne({ email });
+    
+    if (!user || !user.password) {
+      res.status(400).json({ message: 'Invalid credentials' });
+      return;
+    }
+
+    if (!password) {
+      res.status(400).json({ message: 'Password is required' });
+      return;
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      res.status(400).json({ message: 'Invalid credentials' });
+      return;
+    }
+
+    if (!user.isEmailVerified) {
+      res.status(403).json({ message: 'Email not verified' });
+      return;
+    }
+
+    // Check if 2FA is enabled
+    if (user.twoFAEnabled) {
+      if (!twoFAToken) {
+        res.status(403).json({ 
+          message: '2FA token required',
+          requires2FA: true
+        });
+        return;
+      }
+
+      // Verify 2FA token
+      if (!user.twoFASecret) {
+        res.status(500).json({ message: '2FA configuration error' });
+        return;
+      }
+
+      const isValid = TwoFactorAuthService.verifyToken(user.twoFASecret, twoFAToken);
+      if (!isValid) {
+        res.status(400).json({ message: 'Invalid 2FA token' });
+        return;
+      }
+
+      user.twoFAVerified = true;
+      await user.save();
+    }
+
+    // Generate JWT token
+    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '1d' });
+
+    res.json({
+      token,
+      user: {
+        email: user.email,
+        name: user.name,
+        subscriptionStatus: user.subscriptionStatus,
+        subscriptionPlan: user.subscriptionPlan,
+        hasPassword: !!user.password,
+        twoFAEnabled: user.twoFAEnabled
+      }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ message: 'Login failed' });
   }
-  if (!password) {
-    res.status(400).json({ message: "Password is required" });
-    return;
-  }
-  const isMatch = await bcrypt.compare(password, user.password);
-  if (!isMatch) {
-    res.status(400).json({ message: "Invalid credentials" });
-    return;
-  }
-  if (!user.isEmailVerified) {
-    res.status(403).json({ message: "Email not verified" });
-    return;
-  }
-  const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1d" });
-  res.json({
-    token,
-    user: {
-      email: user.email,
-      name: user.name,
-      subscriptionStatus: user.subscriptionStatus,
-      subscriptionPlan: user.subscriptionPlan,
-      hasPassword: !!user.password,
-    },
-  });
 };
 
 export const verifyEmail = async (

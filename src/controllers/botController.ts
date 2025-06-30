@@ -7,6 +7,7 @@ import PaperTrade from '../models/PaperTrade';
 import { runMovingAverageBacktest, BacktestParams } from '../services/strategyEngine';
 import { ExchangeFactory } from '../services/exchange/ExchangeFactory';
 import { startBotJob, stopBotJob } from '../services/botScheduler';
+import { runRSIBacktest, RSIBacktestParams } from '../services/strategyEngine';
 
 export const createBot = async (req: Request, res: Response): Promise<void> => {
   const userId = (req.user as { id: string })?.id;
@@ -157,7 +158,7 @@ export const deleteBot = async (req: Request, res: Response): Promise<void> => {
     // Delete associated logs
     await BotLog.deleteMany({ bot: botId });
     
-    res.json({ message: 'Bot deleted' });
+  res.json({ message: 'Bot deleted' });
   } catch (error) {
     console.error('Error deleting bot:', error);
     res.status(500).json({ message: 'Failed to delete bot', error: (error as Error).message });
@@ -175,10 +176,10 @@ export const toggleBot = async (req: Request, res: Response): Promise<void> => {
   }
   
   try {
-    if (action === 'start') {
+  if (action === 'start') {
       // Start the bot scheduler
       await startBotJob(botId);
-      bot.status = 'running';
+    bot.status = 'running';
       
       // Log the start action
       await BotLog.create({
@@ -187,10 +188,10 @@ export const toggleBot = async (req: Request, res: Response): Promise<void> => {
         type: 'info',
         message: 'Bot started successfully',
       });
-    } else if (action === 'stop') {
+  } else if (action === 'stop') {
       // Stop the bot scheduler
       stopBotJob(botId);
-      bot.status = 'stopped';
+    bot.status = 'stopped';
       
       // Log the stop action
       await BotLog.create({
@@ -199,13 +200,13 @@ export const toggleBot = async (req: Request, res: Response): Promise<void> => {
         type: 'info',
         message: 'Bot stopped successfully',
       });
-    } else {
-      res.status(400).json({ message: 'Invalid action' });
-      return;
-    }
+  } else {
+    res.status(400).json({ message: 'Invalid action' });
+    return;
+  }
     
-    await bot.save();
-    res.json({ bot });
+  await bot.save();
+  res.json({ bot });
   } catch (error) {
     console.error('Error toggling bot:', error);
     
@@ -247,10 +248,35 @@ export const getBotPerformance = async (req: Request, res: Response): Promise<vo
 
 export const backtestBot = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { symbol, shortPeriod, longPeriod, quantity, initialBalance, interval, limit, exchange = 'binance' } = req.body;
-    // Validate input (add more as needed)
-    if (!symbol || !shortPeriod || !longPeriod || !quantity || !initialBalance || !interval) {
-      res.status(400).json({ message: 'Missing required parameters' });
+    const { 
+      strategy = 'moving_average',
+      symbol, 
+      shortPeriod, 
+      longPeriod, 
+      quantity, 
+      initialBalance, 
+      interval, 
+      limit, 
+      exchange = 'binance',
+      // RSI parameters
+      period,
+      overbought,
+      oversold
+    } = req.body;
+
+    // Validate input based on strategy type
+    if (strategy === 'moving_average') {
+      if (!symbol || !shortPeriod || !longPeriod || !quantity || !initialBalance || !interval) {
+        res.status(400).json({ message: 'Missing required parameters for moving average strategy' });
+        return;
+      }
+    } else if (strategy === 'rsi') {
+      if (!symbol || !period || !overbought || !oversold || !quantity || !initialBalance || !interval) {
+        res.status(400).json({ message: 'Missing required parameters for RSI strategy' });
+        return;
+      }
+    } else {
+      res.status(400).json({ message: 'Unsupported strategy type. Supported: moving_average, rsi' });
       return;
     }
     
@@ -262,9 +288,26 @@ export const backtestBot = async (req: Request, res: Response): Promise<void> =>
     
     // Fetch historical data
     const candles = await exchangeService.fetchKlines(symbol, interval, limit || 100);
-    // Run backtest
-    const params: BacktestParams = { symbol, shortPeriod, longPeriod, quantity, initialBalance };
-    const result = runMovingAverageBacktest(candles, params);
+    
+    let result;
+    
+    if (strategy === 'moving_average') {
+      // Run moving average backtest
+      const params: BacktestParams = { symbol, shortPeriod, longPeriod, quantity, initialBalance };
+      result = runMovingAverageBacktest(candles, params);
+    } else if (strategy === 'rsi') {
+      // Run RSI backtest
+      const params: RSIBacktestParams = { 
+        symbol, 
+        period, 
+        overbought, 
+        oversold, 
+        quantity, 
+        initialBalance 
+      };
+      result = runRSIBacktest(candles, params);
+    }
+    
     res.json(result);
   } catch (error) {
     console.error('Backtest error:', error);
