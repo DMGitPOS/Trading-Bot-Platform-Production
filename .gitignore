@@ -1,4 +1,4 @@
 .env
 .env.development.local
-node_modules
 .env.production.local
+node_modules

@@ -165,9 +165,6 @@ export const disable2FA = async (req: Request, res: Response): Promise<void> => 
       return;
     }
 
-    console.log('enabled', user.twoFAEnabled);
-    console.log('secret', user.twoFASecret);
-
     if (!user.twoFAEnabled || !user.twoFASecret) {
       res.status(400).json({ message: '2FA is not enabled' });
       return;
