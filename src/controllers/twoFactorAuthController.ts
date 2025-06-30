@@ -160,12 +160,13 @@ export const disable2FA = async (req: Request, res: Response): Promise<void> => 
     const userId = (req.user as { id: string }).id;
     const user = await User.findById(userId);
 
-    console.log('user', user);
-
     if (!user) {
       res.status(404).json({ message: 'User not found' });
       return;
     }
+
+    console.log('enabled', user.twoFAEnabled);
+    console.log('secret', user.twoFASecret);
 
     if (!user.twoFAEnabled || !user.twoFASecret) {
       res.status(400).json({ message: '2FA is not enabled' });
