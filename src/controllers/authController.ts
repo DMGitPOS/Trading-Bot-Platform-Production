@@ -190,6 +190,8 @@ export const getMe = async (req: Request, res: Response): Promise<void> => {
       subscriptionStatus: user.subscriptionStatus,
       subscriptionPlan: user.subscriptionPlan,
       hasPassword: !!userWithPassword.password,
+      twoFAEnabled: user.twoFAEnabled,
+      twoFAVerified: user.twoFAVerified,
     },
   });
 };

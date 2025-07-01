@@ -280,6 +280,7 @@ export const generateNewBackupCodes = async (req: Request, res: Response): Promi
       'New 2FA Backup Codes - Keep Safe',
       `Your new backup codes for two-factor authentication:\n\n${plainCodes.join('\n')}\n\nKeep these codes safe and secure. Each code can only be used once.`
     );
+    console.log('New 2FA Backup Codes');
 
     res.json({
       message: 'New backup codes generated successfully',
