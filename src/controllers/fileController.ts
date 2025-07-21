@@ -2,8 +2,8 @@ import { Request, Response } from 'express';
 import path from 'path';
 import { UploadedFile } from 'express-fileupload';
 
-export const UPLOAD_DIR = path.join(__dirname, '../../../frontend/public/uploads/');
-// export const UPLOAD_DIR = path.join(__dirname, '../static/uploads/');
+// export const UPLOAD_DIR = path.join(__dirname, '../../../frontend/public/uploads/');
+export const UPLOAD_DIR = path.join(__dirname, '../static/uploads/');
 
 const generateFileName = (originalName: string): string => {
     const fileExt = originalName.split('.').pop();
