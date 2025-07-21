@@ -1,293 +1,303 @@
+import Joi from 'joi';
+import jwt from 'jsonwebtoken';
 import { Request, Response } from 'express';
-import { TwoFactorAuthService } from '../services/2fa/twoFactorAuth.service';
-import User from '../models/User';
-import { sendEmail } from '../services/email/email.service';
-import jwt from "jsonwebtoken";
+import User, { IUser } from '../models/User';
+import { sendEmail } from '../services/email.service';
+import { TwoFactorAuthService } from '../services/twoFactorAuth.service';
 
-const JWT_SECRET = process.env.JWT_SECRET || "secret";
+const JWT_SECRET_KEY: string = process.env.JWT_SECRET_KEY || 'default_jwt_secret';
 
-/**
- * Initialize 2FA setup for a user
- * Returns QR code and secret for the authenticator app
- */
-export const setup2FA = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const userId = (req.user as { id: string }).id;
-    const user = await User.findById(userId);
-    
-    if (!user) {
-      res.status(404).json({ message: 'User not found' });
-      return;
+const enable2FASchema = Joi.object({
+    token: Joi.string().required(),
+});
+
+const verify2FASchema = Joi.object({
+    token: Joi.string().required(),
+    email: Joi.string().email().required(),
+});
+
+const disable2FASchema = Joi.object({
+    token: Joi.string().required(),
+});
+
+const verifyBackupCodeSchema = Joi.object({
+    code: Joi.string().required(),
+    email: Joi.string().email().required(),
+});
+
+export const setup2FA = async (
+    req: Request,
+    res: Response
+): Promise<Response | void> => {
+    try {
+        const userId = (req.user as { id: string }).id;
+        if (!userId) {
+            return res.status(401).json({ error: 'Not authorized' });
+        }
+
+        const user: IUser | null = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        if (user.twoFAEnabled) {
+            return res.status(400).json({ message: '2FA is already enabled' });
+        }
+
+        const secretData = await TwoFactorAuthService.generateSecret(user.email);
+        user.tempSecret = secretData.secret;
+        await user.save();
+
+        res.status(201).json({
+            qrcode: secretData.qrcode,
+            secret: secretData.secret,
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Setup 2FA failed' });
     }
-
-    if (user.twoFAEnabled) {
-      res.status(400).json({ message: '2FA is already enabled' });
-      return;
-    }
-
-    // Generate new secret
-    const secretData = await TwoFactorAuthService.generateSecret(user.email);
-    
-    // Store temporary secret
-    user.tempSecret = secretData.secret;
-    await user.save();
-
-    res.json({
-      qrcode: secretData.qrcode,
-      secret: secretData.secret,
-      message: 'Scan the QR code with your authenticator app'
-    });
-  } catch (error) {
-    console.error('2FA setup error:', error);
-    res.status(500).json({ message: 'Failed to setup 2FA' });
-  }
 };
 
-/**
- * Verify and enable 2FA for a user
- * Requires a valid token from the authenticator app
- */
-export const enable2FA = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { token } = req.body;
-    const userId = (req.user as { id: string }).id;
-    const user = await User.findById(userId);
+export const enable2FA = async (
+    req: Request,
+    res: Response
+): Promise<Response | void> => {
+    try {
+        const { error } = enable2FASchema.validate(req.body);
+        if (error) {
+            return res.status(400).json({ error: error.details[0].message });
+        }
 
-    if (!user) {
-      res.status(404).json({ message: 'User not found' });
-      return;
+        const { token } = req.body;
+        const userId = (req.user as { id: string }).id;
+        if (!userId) {
+            return res.status(401).json({ error: 'Not authorized' });
+        }
+
+        const user: IUser | null = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        if (user.twoFAEnabled) {
+            return res.status(400).json({ message: '2FA is already enabled' });
+        }
+        if (!user.tempSecret) {
+            return res.status(400).json({ message: '2FA setup not initiated' });
+        }
+
+        const isValid = TwoFactorAuthService.verifyToken(user.tempSecret, token);
+        if (!isValid) {
+            return res.status(400).json({ message: 'Invalid verification code' });
+        }
+
+        const { hashedCodes, plainCodes } = TwoFactorAuthService.generateBackupCodes();
+        user.twoFASecret = user.tempSecret;
+        user.tempSecret = undefined;
+        user.twoFAEnabled = true;
+        user.twoFAVerified = true;
+        user.backupCodes = hashedCodes;
+        await user.save();
+
+        await sendEmail(
+            user.email,
+            '2FA Backup Codes - Keep Safe',
+            `Your backup codes for two-factor authentication:\n\n${plainCodes.join('\n')}\n\nKeep these codes safe and secure. Each code can only be used once.`
+        );
+
+        res.status(201).json({ success: true });
+    } catch (error) {
+        res.status(500).json({ message: 'Enable 2FA failed' });
     }
-
-    if (user.twoFAEnabled) {
-      res.status(400).json({ message: '2FA is already enabled' });
-      return;
-    }
-
-    if (!user.tempSecret) {
-      res.status(400).json({ message: '2FA setup not initiated' });
-      return;
-    }
-
-    // Verify the token
-    const isValid = TwoFactorAuthService.verifyToken(user.tempSecret, token);
-    if (!isValid) {
-      res.status(400).json({ message: 'Invalid verification code' });
-      return;
-    }
-
-    // Generate backup codes
-    const { hashedCodes, plainCodes } = TwoFactorAuthService.generateBackupCodes();
-
-    // Enable 2FA
-    user.twoFASecret = user.tempSecret;
-    user.tempSecret = undefined;
-    user.twoFAEnabled = true;
-    user.twoFAVerified = true;
-    user.backupCodes = hashedCodes;
-    await user.save();
-
-    // Send backup codes via email
-    await sendEmail(
-      user.email,
-      '2FA Backup Codes - Keep Safe',
-      `Your backup codes for two-factor authentication:\n\n${plainCodes.join('\n')}\n\nKeep these codes safe and secure. Each code can only be used once.`
-    );
-
-    res.json({
-      message: 'Two-factor authentication enabled successfully',
-      backupCodes: plainCodes
-    });
-  } catch (error) {
-    console.error('2FA enable error:', error);
-    res.status(500).json({ message: 'Failed to enable 2FA' });
-  }
 };
 
-/**
- * Verify 2FA token during login
- */
-export const verify2FA = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { token, email } = req.body;
-    const user = await User.findOne({ email });
+export const verify2FA = async (
+    req: Request,
+    res: Response
+): Promise<Response | void> => {
+    try {
+        const { error } = verify2FASchema.validate(req.body);
+        if (error) {
+            return res.status(400).json({ error: error.details[0].message });
+        }
 
-    if (!user) {
-      res.status(404).json({ message: 'User not found' });
-      return;
+        const { token, email } = req.body;
+        const user: IUser | null = await User.findOne({ email });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        if (!user.twoFAEnabled || !user.twoFASecret) {
+            return res.status(400).json({ message: '2FA is not enabled' });
+        }
+
+        const isValid = TwoFactorAuthService.verifyToken(user.twoFASecret, token);
+        if (!isValid) {
+            return res.status(400).json({ message: 'Invalid verification code' });
+        }
+
+        user.twoFAVerified = true;
+        await user.save();
+
+        const jwtToken = jwt.sign(
+            { id: user._id, email: user.email },
+            JWT_SECRET_KEY,
+            { expiresIn: '7d' }
+        );
+
+        res.status(201).json({
+            token: jwtToken,
+            user: {
+                id: user._id,
+                name: user.name,
+                email: user.email,
+                avatar: user.avatar,
+                role: user.role,
+                subscriptionStatus: user.subscriptionStatus,
+                subscriptionPlan: user.subscriptionPlan,
+                hasPassword: !!user.password,
+                twoFAEnabled: user.twoFAEnabled,
+            },
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Verify 2FA failed' });
     }
-
-    if (!user.twoFAEnabled || !user.twoFASecret) {
-      res.status(400).json({ message: '2FA is not enabled' });
-      return;
-    }
-
-    const isValid = TwoFactorAuthService.verifyToken(user.twoFASecret, token);
-    if (!isValid) {
-      res.status(400).json({ message: 'Invalid verification code' });
-      return;
-    }
-
-    user.twoFAVerified = true;
-    await user.save();
-
-    // Generate JWT token
-    const jwtToken = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '1d' });
-
-    res.json({
-      token: jwtToken,
-      user: {
-        email: user.email,
-        name: user.name,
-        subscriptionStatus: user.subscriptionStatus,
-        subscriptionPlan: user.subscriptionPlan,
-        hasPassword: !!user.password,
-        twoFAEnabled: user.twoFAEnabled
-      }
-    });
-  } catch (error) {
-    console.error('2FA verification error:', error);
-    res.status(500).json({ message: 'Failed to verify 2FA' });
-  }
 };
 
-/**
- * Disable 2FA for a user
- * Requires current password and 2FA token for security
- */
-export const disable2FA = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { token } = req.body;
-    const userId = (req.user as { id: string }).id;
-    const user = await User.findById(userId);
+export const disable2FA = async (
+    req: Request,
+    res: Response
+): Promise<Response | void> => {
+    try {
+        const { error } = disable2FASchema.validate(req.body);
+        if (error) {
+            return res.status(400).json({ error: error.details[0].message });
+        }
 
-    if (!user) {
-      res.status(404).json({ message: 'User not found' });
-      return;
+        const { token } = req.body;
+        const userId = (req.user as { id: string }).id;
+        if (!userId) {
+            return res.status(401).json({ error: 'Not authorized' });
+        }
+
+        const user: IUser | null = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        if (!user.twoFAEnabled || !user.twoFASecret) {
+            return res.status(400).json({ message: '2FA is not enabled' });
+        }
+
+        const isValid = TwoFactorAuthService.verifyToken(user.twoFASecret, token);
+        if (!isValid) {
+            return res.status(400).json({ message: 'Invalid verification code' });
+        }
+
+        user.twoFAEnabled = false;
+        user.twoFASecret = undefined;
+        user.twoFAVerified = false;
+        user.backupCodes = [];
+        await user.save();
+
+        res.status(201).json({ success: true });
+    } catch (error) {
+        res.status(500).json({ message: 'Disable 2FA failed' });
     }
-
-    if (!user.twoFAEnabled || !user.twoFASecret) {
-      res.status(400).json({ message: '2FA is not enabled' });
-      return;
-    }
-
-    // Verify the token one last time
-    const isValid = TwoFactorAuthService.verifyToken(user.twoFASecret, token);
-    if (!isValid) {
-      res.status(400).json({ message: 'Invalid verification code' });
-      return;
-    }
-
-    // Disable 2FA
-    user.twoFAEnabled = false;
-    user.twoFASecret = undefined;
-    user.twoFAVerified = false;
-    user.backupCodes = [];
-    await user.save();
-
-    res.json({ message: 'Two-factor authentication disabled successfully' });
-  } catch (error) {
-    console.error('2FA disable error:', error);
-    res.status(500).json({ message: 'Failed to disable 2FA' });
-  }
 };
 
-/**
- * Verify backup code and grant access
- */
-export const verifyBackupCode = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { code, email } = req.body;
-    const user = await User.findOne({ email });
+export const verifyBackupCode = async (
+    req: Request,
+    res: Response
+): Promise<Response | void> => {
+    try {
+        const { error } = verifyBackupCodeSchema.validate(req.body);
+        if (error) {
+            return res.status(400).json({ error: error.details[0].message });
+        }
 
-    if (!user) {
-      res.status(404).json({ message: 'User not found' });
-      return;
+        const { code, email } = req.body;
+        const user: IUser | null = await User.findOne({ email });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        if (!user.twoFAEnabled || !user.backupCodes || user.backupCodes.length === 0) {
+            return res.status(400).json({ message: '2FA is not properly configured' });
+        }
+
+        const codeIndex = TwoFactorAuthService.verifyBackupCode(code, user.backupCodes);
+        if (codeIndex === -1) {
+            return res.status(400).json({ message: 'Invalid backup code' });
+        }
+
+        user.backupCodes = user.backupCodes.filter((_, index) => index !== codeIndex);
+        user.twoFAVerified = true;
+        await user.save();
+
+        if (user.backupCodes.length === 0) {
+            await sendEmail(
+                user.email,
+                'Generate New Backup Codes',
+                'You have used your last backup code. Please generate new backup codes for your account security.'
+            );
+        }
+
+        const jwtToken = jwt.sign(
+            { id: user._id, email: user.email },
+            JWT_SECRET_KEY,
+            { expiresIn: '7d' }
+        );
+
+        res.status(201).json({
+            token: jwtToken,
+            user: {
+                id: user._id,
+                name: user.name,
+                email: user.email,
+                avatar: user.avatar,
+                role: user.role,
+                subscriptionStatus: user.subscriptionStatus,
+                subscriptionPlan: user.subscriptionPlan,
+                hasPassword: !!user.password,
+                twoFAEnabled: user.twoFAEnabled,
+            },
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Verify backup code failed' });
     }
-
-    if (!user.twoFAEnabled || !user.backupCodes || user.backupCodes.length === 0) {
-      res.status(400).json({ message: '2FA is not properly configured' });
-      return;
-    }
-
-    const codeIndex = TwoFactorAuthService.verifyBackupCode(code, user.backupCodes);
-    if (codeIndex === -1) {
-      res.status(400).json({ message: 'Invalid backup code' });
-      return;
-    }
-
-    // Remove the used backup code
-    user.backupCodes = user.backupCodes.filter((_, index) => index !== codeIndex);
-    user.twoFAVerified = true;
-    await user.save();
-
-    // If this was the last backup code, notify user to generate new ones
-    if (user.backupCodes.length === 0) {
-      await sendEmail(
-        user.email,
-        'Generate New Backup Codes',
-        'You have used your last backup code. Please generate new backup codes for your account security.'
-      );
-    }
-
-    // Generate JWT token
-    const jwtToken = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '1d' });
-
-    res.json({
-      token: jwtToken,
-      user: {
-        email: user.email,
-        name: user.name,
-        subscriptionStatus: user.subscriptionStatus,
-        subscriptionPlan: user.subscriptionPlan,
-        hasPassword: !!user.password,
-        twoFAEnabled: user.twoFAEnabled
-      }
-    });
-  } catch (error) {
-    console.error('Backup code verification error:', error);
-    res.status(500).json({ message: 'Failed to verify backup code' });
-  }
 };
 
-/**
- * Generate new backup codes
- */
-export const generateNewBackupCodes = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const userId = (req.user as { id: string }).id;
-    const user = await User.findById(userId);
+export const generateNewBackupCodes = async (
+    req: Request,
+    res: Response
+): Promise<Response | void> => {
+    try {
+        const userId = (req.user as { id: string }).id;
+        if (!userId) {
+            return res.status(401).json({ error: 'Not authorized' });
+        }
 
-    if (!user) {
-      res.status(404).json({ message: 'User not found' });
-      return;
+        const user: IUser | null = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        if (!user.twoFAEnabled) {
+            return res.status(400).json({ message: '2FA is not enabled' });
+        }
+
+        const { hashedCodes, plainCodes } = TwoFactorAuthService.generateBackupCodes();
+        user.backupCodes = hashedCodes;
+        await user.save();
+
+        await sendEmail(
+            user.email,
+            'New 2FA Backup Codes - Keep Safe',
+            `Your new backup codes for two-factor authentication:\n\n${plainCodes.join('\n')}\n\nKeep these codes safe and secure. Each code can only be used once.`
+        );
+
+        res.status(201).json({ success: true });
+    } catch (error) {
+        res.status(500).json({ message: 'Generate new backup codes failed' });
     }
-
-    if (!user.twoFAEnabled) {
-      res.status(400).json({ message: '2FA is not enabled' });
-      return;
-    }
-
-    // Generate new backup codes
-    const { hashedCodes, plainCodes } = TwoFactorAuthService.generateBackupCodes();
-
-    // Update user's backup codes
-    user.backupCodes = hashedCodes;
-    await user.save();
-
-    // Send new backup codes via email
-    await sendEmail(
-      user.email,
-      'New 2FA Backup Codes - Keep Safe',
-      `Your new backup codes for two-factor authentication:\n\n${plainCodes.join('\n')}\n\nKeep these codes safe and secure. Each code can only be used once.`
-    );
-    console.log('New 2FA Backup Codes');
-
-    res.json({
-      message: 'New backup codes generated successfully',
-      backupCodes: plainCodes
-    });
-  } catch (error) {
-    console.error('Backup codes generation error:', error);
-    res.status(500).json({ message: 'Failed to generate new backup codes' });
-  }
 }; 

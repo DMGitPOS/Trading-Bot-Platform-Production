@@ -7,7 +7,8 @@
     "start": "node dist/server.js",
     "dev": "nodemon --exec ts-node src/server.ts",
     "build": "tsc && cp -r src/static dist/ && cp -r src/emailTemplate dist/",
-    "format": "prettier --write \"src/**/*.ts\""
+    "format": "prettier --write \"src/**/*.ts\"",
+    "lint": "eslint \"src/**/*.ts\" --max-warnings=0"
   },
   "dependencies": {
     "@binance/connector-typescript": "^0.3.16",
@@ -31,9 +32,11 @@
     "passport": "^0.7.0",
     "passport-facebook": "^3.0.0",
     "passport-google-oauth20": "^2.0.0",
+    "paypal-rest-sdk": "^1.8.1",
     "qrcode": "^1.5.4",
     "speakeasy": "^2.0.0",
     "stripe": "^18.0.0",
+    "twilio": "^5.7.3",
     "winston": "^3.11.0"
   },
   "devDependencies": {
@@ -49,6 +52,7 @@
     "@types/passport": "^1.0.17",
     "@types/passport-facebook": "^3.0.3",
     "@types/passport-google-oauth20": "^2.0.16",
+    "@types/paypal-rest-sdk": "^1.7.9",
     "@types/qrcode": "^1.5.5",
     "@types/speakeasy": "^2.0.10",
     "@typescript-eslint/eslint-plugin": "^6.15.0",

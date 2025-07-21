@@ -16,8 +16,8 @@ export const sendEmail = async (to: string, subject: string, htmlTemplate: strin
         port: Number(process.env.SMTP_PORT) || 465,
         secure: true,
         auth: {
-          user: process.env.SMTP_EMAIL,
-          pass: process.env.SMTP_PASSWORD,
+            user: process.env.SMTP_EMAIL,
+            pass: process.env.SMTP_PASSWORD,
         },
         tls: {
             rejectUnauthorized: false,
@@ -38,7 +38,7 @@ export const sendVerificationEmail = async (to: string, verificationUrl: string)
         
         const templateFilePath = path.join(
             __dirname,
-            "../../emailTemplate/email-verification.html"
+            "../emailTemplate/email-verification.html"
         );
         const year = new Date().getFullYear();
         const htmlTemplate = getHtmlTemplateWithData(
@@ -59,7 +59,7 @@ export const sendResetPasswordEmail = async (to: string, verificationUrl: string
         
         const templateFilePath = path.join(
             __dirname,
-            "/../emailTemplate/password-reset.html"
+            "../emailTemplate/password-reset.html"
         );
         const year = new Date().getFullYear();
         const htmlTemplate = getHtmlTemplateWithData(
@@ -79,7 +79,7 @@ export const sendContactUsEmail = async (name: string, email: string, message: s
         const subject = "New Contact Us Message";
         const templateFilePath = path.join(
             __dirname,
-            "/../emailTemplate/contact-us.html"
+            "../emailTemplate/contact-us.html"
         );
         const year = new Date().getFullYear();
         const htmlTemplate = getHtmlTemplateWithData(

@@ -1,273 +1,435 @@
 import { Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import Joi from 'joi';
+import path from 'path';
+import { UploadedFile } from 'express-fileupload';
 import User from "../models/User";
-import crypto from "crypto";
-import Trade from "../models/Trade";
-import { sendVerificationEmail } from "../services/email/email.service";
-import { TwoFactorAuthService } from "../services/2fa/twoFactorAuth.service";
+import { sendVerificationEmail,
+  sendResetPasswordEmail } from "../services/email.service";
+import { TwoFactorAuthService } from "../services/twoFactorAuth.service";
+import { handleFileUpload, UPLOAD_DIR } from "./fileController";
+import { AuthRequest } from "../middleware/auth";
+import ReferralRewardHistory from '../models/ReferralRewardHistory';
+import NotificationPreference from "../models/NotificationPreference";
+import { notifyUser } from '../services/notification/notifyUser';
 
-const frontend = process.env.FRONTEND;
-const JWT_SECRET = process.env.JWT_SECRET || "secret";
+const registerSchema = Joi.object({
+    name: Joi.string().min(2).max(50).required(),
+    email: Joi.string().email().required(),
+    password: Joi.string().min(6).required(),
+    referralCode: Joi.string().optional(),
+});
 
-const sendEmail = async (
-  to: string,
-  subject: string,
-  text: string,
-): Promise<void> => {
-  console.log(`Email to ${to}: ${subject}\n${text}`);
-};
+const loginSchema = Joi.object({
+    email: Joi.string().email().required(),
+    password: Joi.string().required(),
+    twoFAToken: Joi.string()
+});
 
-export const register = async (req: Request, res: Response): Promise<void> => {
-  const { email, password, name } = req.body;
-  const existingUser = await User.findOne({ email });
-  if (existingUser) {
-    res.status(400).json({ message: "User already exists" });
-    return;
-  }
-  const hashedPassword = await bcrypt.hash(password, 10);
-  const emailVerificationToken = crypto.randomBytes(32).toString("hex");
-  const user = new User({
-    email,
-    password: hashedPassword,
-    name,
-    emailVerificationToken,
-  });
-  await user.save();
-  const verificationLink = `${frontend}/auth/verify-email?email=${encodeURIComponent(email)}&token=${emailVerificationToken}`;
-  await sendVerificationEmail(email, verificationLink);
-  console.log(`Verification link: ${verificationLink}`);
-  res
-    .status(201)
-    .json({ message: "User registered. Please verify your email." });
-};
+const verifyEmailSchema = Joi.object({
+    token: Joi.string().required(),
+});
 
-export const login = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { email, password, twoFAToken } = req.body;
-    const user = await User.findOne({ email });
+const forgotPasswordSchema = Joi.object({
+    email: Joi.string().email().required(),
+});
+
+const resetPasswordSchema = Joi.object({
+    token: Joi.string().required(),
+    password: Joi.string().min(6).required(),
+});
+
+const updateProfileSchema = Joi.object({
+    name: Joi.string().min(2).max(50).required(),
+});
+
+const changePasswordSchema = Joi.object({
+    newPassword: Joi.string().min(6).required(),
+    currentPassword: Joi.string(),
     
-    if (!user || !user.password) {
-      res.status(400).json({ message: 'Invalid credentials' });
-      return;
-    }
+});
 
-    if (!password) {
-      res.status(400).json({ message: 'Password is required' });
-      return;
-    }
+const JWT_SECRET_KEY = process.env.JWT_SECRET_KEY || 'default_jwt_secret';
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      res.status(400).json({ message: 'Invalid credentials' });
-      return;
-    }
+export const register = async (req: Request, res: Response) => {
+    try {
+        const { error } = registerSchema.validate(req.body);
+        if (error) return res.status(400).json({ error: error.details[0].message });
 
-    if (!user.isEmailVerified) {
-      res.status(403).json({ message: 'Email not verified' });
-      return;
-    }
+        const { name, email, password, referralCode } = req.body;
 
-    // Check if 2FA is enabled
-    if (user.twoFAEnabled) {
-      if (!twoFAToken) {
-        res.status(403).json({ 
-          message: '2FA token required',
-          requires2FA: true
+        const existingUser = await User.findOne({ email });
+        if (existingUser) return res.status(409).json({
+          error: 'Email already registered'
         });
-        return;
-      }
 
-      // Verify 2FA token
-      if (!user.twoFASecret) {
-        res.status(500).json({ message: '2FA configuration error' });
-        return;
-      }
+        const hashedPassword = await bcrypt.hash(password, 10);
 
-      const isValid = TwoFactorAuthService.verifyToken(user.twoFASecret, twoFAToken);
-      if (!isValid) {
-        res.status(400).json({ message: 'Invalid 2FA token' });
-        return;
-      }
+        // Prepare new user data
+        const newUserData: any = {
+            name,
+            email,
+            password: hashedPassword,
+        };
 
-      user.twoFAVerified = true;
-      await user.save();
+        // Handle referral logic
+        if (referralCode) {
+            const referrer = await User.findOne({ referralCode });
+            if (referrer) {
+                newUserData.referredBy = referrer._id;
+            }
+        }
+
+        const user = await User.create(newUserData);
+
+        // If referred, update referrer's referrals and rewards, and create reward history
+        if (user.referredBy) {
+            await User.findByIdAndUpdate(
+                user.referredBy,
+                {
+                    $push: { referrals: user._id },
+                    $inc: { referralRewards: 1 },
+                }
+            );
+            // Create referral reward history (pending until email verification)
+            await ReferralRewardHistory.create({
+                user: user.referredBy,
+                referredUser: user._id,
+                rewardAmount: 1,
+                status: 'pending',
+                description: `Reward for referring user ${user.email}`,
+            });
+            // Notify referrer by email
+            const referrer = await User.findById(user.referredBy);
+            if (referrer && referrer.email) {
+                await notifyUser({
+                    userId: String(referrer._id),
+                    type: 'referral',
+                    message: `Congratulations! You earned a reward for referring ${user.email}.`,
+                });
+            }
+        }
+
+        const verifyEmailToken = user.generateEmailVerificationToken(email);
+        const verificationUrl = user.createVerificationUrl(verifyEmailToken);
+        await user.save();
+
+        await sendVerificationEmail(email, verificationUrl);
+
+        res.status(201).json({
+            success: true
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Registration failed' });
     }
-
-    // Generate JWT token
-    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '1d' });
-
-    res.json({
-      token,
-      user: {
-        email: user.email,
-        name: user.name,
-        subscriptionStatus: user.subscriptionStatus,
-        subscriptionPlan: user.subscriptionPlan,
-        hasPassword: !!user.password,
-        twoFAEnabled: user.twoFAEnabled
-      }
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ message: 'Login failed' });
-  }
 };
 
-export const verifyEmail = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
-  const { email, token } = req.body;
-  const user = await User.findOne({ email });
-  if (!user || user.emailVerificationToken !== token) {
-    res.status(400).json({ message: "Invalid token" });
-    return;
-  }
-  user.isEmailVerified = true;
-  user.emailVerificationToken = undefined;
-  await user.save();
-  res.json({ message: "Email verified" });
-};
+export const login = async (req: Request, res: Response) => {
+    try {
+        const { error } = loginSchema.validate(req.body);
+        if (error) return res.status(400).json({ error: error.details[0].message });
 
-export const forgotPassword = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
-  const { email } = req.body;
-  const user = await User.findOne({ email });
-  if (!user) {
-    res.status(400).json({ message: "User not found" });
-    return;
-  }
-  const resetToken = crypto.randomBytes(32).toString("hex");
-  user.resetPasswordToken = resetToken;
-  await user.save();
-  const resetLink = `${frontend}/auth/reset-password?email=${encodeURIComponent(email)}&token=${resetToken}`;
-  await sendEmail(
-    email,
-    "Reset your password",
-    `Click the link to reset: ${resetLink}\nOr use this token: ${resetToken}`
-  );
-  console.log(`Password reset link: ${resetLink}`);
-  res.json({ message: "Password reset email sent" });
-};
+        const { email, password, twoFAToken } = req.body;
 
-export const resetPassword = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
-  const { email, token, newPassword } = req.body;
-  const user = await User.findOne({ email });
-  if (!user || user.resetPasswordToken !== token) {
-    res.status(400).json({ message: "Invalid token" });
-    return;
-  }
-  user.password = await bcrypt.hash(newPassword, 10);
-  user.resetPasswordToken = undefined;
-  await user.save();
-  res.json({ message: "Password reset successful" });
-};
+        const user = await User.findOne({ email }).select('+password');
+        if (!user) return res.status(401).json({ error: 'Invalid your email' });
 
-export const getMe = async (req: Request, res: Response): Promise<void> => {
-  const userId = (req.user as { id: string })?.id;
-  const userWithPassword = await User.findById(userId).select("password");
-  if (!userWithPassword) {
-    res.status(404).json({ message: "User not found" });
-    return;
-  }
-  const user = await User.findById(userId).select(
-    "-password -emailVerificationToken -resetPasswordToken -twoFASecret"
-  );
-  if (!user) {
-    res.status(404).json({ message: "User not found" });
-    return;
-  }
-  res.json({
-    user: {
-      email: user.email,
-      name: user.name,
-      subscriptionStatus: user.subscriptionStatus,
-      subscriptionPlan: user.subscriptionPlan,
-      hasPassword: !!userWithPassword.password,
-      twoFAEnabled: user.twoFAEnabled,
-      twoFAVerified: user.twoFAVerified,
-    },
-  });
-};
+        const isMatch = await user.comparePassword(password);
+        if (!isMatch) return res.status(401).json({ error: 'Invalid your password' });
 
-export const googleAuthCallback = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
-  const user = req.user as { _id: string } | undefined;
-  if (!user) {
-    res.status(401).json({ message: "Google authentication failed" });
-    return;
-  }
-  const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1d" });
-  const frontendUrl = process.env.FRONTEND;
-  res.redirect(`${frontendUrl}/auth?token=${token}`);
-};
+        if (!user.isEmailVerified) {
+            return res.status(401).json({ error: 'Please verify your email first' });
+        }
 
-export const getUserTrades = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
-  const userId = (req.user as { id: string })?.id;
-  const trades = await Trade.find({ user: userId }).sort({ timestamp: -1 });
-  res.json({ trades });
-};
+        if (user.twoFAEnabled) {
+            if (!twoFAToken) {
+                return res.status(201).json({ requires2FA: true });
+            }
+      
+            if (!user.twoFASecret) {
+                return res.status(500).json({ error: '2FA configuration error' });
+            }
+      
+            const isValid = TwoFactorAuthService.verifyToken(user.twoFASecret, twoFAToken);
+            if (!isValid) {
+                return res.status(400).json({ error: 'Invalid 2FA token' });
+            }
+      
+            user.twoFAVerified = true;
+            await user.save();
+        }
+        
+        const token = jwt.sign(
+          { id: user._id, email: user.email },
+          JWT_SECRET_KEY,
+          { expiresIn: '7d' }
+        );
 
-export const updateProfile = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
-  const userId = (req.user as { id: string })?.id;
-  const { name, email } = req.body;
-  if (!name && !email) {
-    res.status(400).json({ message: "No changes provided" });
-    return;
-  }
-  const update: Partial<{ name: string; email: string }> = {};
-  if (name) update.name = name;
-  if (email) update.email = email;
-  const user = await User.findByIdAndUpdate(userId, update, {
-    new: true,
-  }).select("-password");
-  res.json({ user });
-};
-
-export const changePassword = async (
-  req: Request,
-  res: Response
-): Promise<void> => {
-  const userId = (req.user as { id: string })?.id;
-  const { currentPassword, newPassword } = req.body;
-  const user = await User.findById(userId);
-  if (!user) {
-    res.status(404).json({ message: "User not found" });
-    return;
-  }
-  if (user.password) {
-    if (!currentPassword || !newPassword) {
-      res
-        .status(400)
-        .json({ message: "Current and new password are required" });
-      return;
+        res.status(201).json({
+            token,
+            user: {
+                id: user._id,
+                name: user.name,
+                email: user.email,
+                avatar: user.avatar,
+                role: user.role,
+                subscriptionStatus: user.subscriptionStatus,
+                subscriptionPlan: user.subscriptionPlan,
+                hasPassword: !!user.password,
+                twoFAEnabled: user.twoFAEnabled
+            },
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Login failed' });
     }
-    const isMatch = await bcrypt.compare(currentPassword, user.password);
-    if (!isMatch) {
-      res.status(400).json({ message: "Current password is incorrect" });
-      return;
+};
+
+export const verifyEmail = async (req: Request, res: Response) => {
+    try {
+        const { error } = verifyEmailSchema.validate(req.body);
+        if (error) return res.status(400).json({ error: error.details[0].message });
+
+        const { token } = req.body;
+
+        const user = await User.findOne({
+            verifyEmailToken: token,
+            verifyEmailExpire: { $gt: Date.now() },
+        });
+
+        if (!user) {
+            return res.status(400).json({ error: 'Invalid or expired verification token' });
+        }
+
+        if (user.isEmailVerified) {
+            return res.status(400).json({ error: 'Email is already verified' });
+        }
+
+        user.isEmailVerified = true;
+        user.verifyEmailToken = undefined;
+        user.verifyEmailExpire = undefined;
+        await user.save();
+
+        // Referral reward: complete if pending
+        if (user.referredBy) {
+            const pendingReward = await ReferralRewardHistory.findOne({
+                user: user.referredBy,
+                referredUser: user._id,
+                status: 'pending',
+            });
+            if (pendingReward) {
+                pendingReward.status = 'completed';
+                await pendingReward.save();
+                // Increment referrer's reward count
+                await User.findByIdAndUpdate(user.referredBy, { $inc: { referralRewards: 1 } });
+                // Notify referrer by email
+                const referrer = await User.findById(user.referredBy);
+                if (referrer && referrer.email) {
+                    await notifyUser({
+                        userId: String(referrer._id),
+                        type: 'referral',
+                        message: `Congratulations! You earned a reward for referring ${user.email} (after they verified their email).`,
+                    });
+                }
+            }
+        }
+
+        const pref = new NotificationPreference({
+            user: user._id,
+        });
+
+        await pref.save();
+
+        res.status(201).json({
+            success: true
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Email verification failed' });
     }
-  } else {
-    if (!newPassword) {
-      res.status(400).json({ message: "New password is required" });
-      return;
+};
+
+export const forgotPassword = async (req: Request, res: Response) => {
+    try {
+        const { error } = forgotPasswordSchema.validate(req.body);
+        if (error) return res.status(400).json({ error: error.details[0].message });
+
+        const { email } = req.body;
+
+        const user = await User.findOne({ email });
+        if (!user) return res.status(404).json({ message: 'User not found' });        
+
+        const resetToken = user.generateEmailVerificationToken(email);
+        const resetUrl = user.resetPasswordUrl(resetToken);
+        await user.save();
+
+        await sendResetPasswordEmail(email, resetUrl);
+
+        res.status(201).json({
+            success: true
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Password reset request failed' });
     }
-  }
-  user.password = await bcrypt.hash(newPassword, 10);
-  await user.save();
-  res.json({ message: "Password updated successfully" });
+};
+
+export const resetPassword = async (req: Request, res: Response) => {
+    try {
+        const { error } = resetPasswordSchema.validate(req.body);
+        if (error) return res.status(400).json({ error: error.details[0].message });
+
+        const { token, password } = req.body;
+
+        const user = await User.findOne({
+            resetPasswordToken: token,
+            resetPasswordExpire: { $gt: Date.now() },
+        });
+
+        if (!user) return res.status(400).json({ error: 'Invalid or expired password reset token' });    
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+        user.password = hashedPassword;
+        user.resetPasswordToken = undefined;
+        user.resetPasswordExpire = undefined;
+        await user.save();
+
+        res.status(201).json({
+            success: true
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Password reset failed' });
+    }
+};
+
+export const updateProfile = async (req: Request, res: Response) => {
+    try {
+        const { error } = updateProfileSchema.validate(req.body);
+        if (error) return res.status(400).json({ error: error.details[0].message });
+
+        const userId = (req as AuthRequest).user?.id;
+        if (!userId) return res.status(401).json({ error: 'Not authorized' });
+        
+        const { name } = req.body;
+        let filePath = '';
+        if (req.files && Object.keys(req.files).length > 0) {
+            const uploadedFile = req.files.file as UploadedFile;
+        
+            const uploadPath = await handleFileUpload(uploadedFile, UPLOAD_DIR);
+            const fileName = path.basename(uploadPath);
+            filePath = `/uploads/${fileName}`;
+        }
+
+        const update: Partial<{ name: string; avatar: string }> = {};
+        if (name) update.name = name;
+        if (filePath) update.avatar = filePath;
+
+        const user = await User.findByIdAndUpdate(
+            userId,
+            update, 
+            { new: true }
+        );
+
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        res.status(201).json({
+            name: user.name,
+            avatar: user.avatar,
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Update profile failed' });
+    }
+};
+
+export const changePassword = async (req: Request, res: Response) => {
+    try {
+        const { error } = changePasswordSchema.validate(req.body);
+        if (error) return res.status(400).json({ error: error.details[0].message });
+
+        const userId = (req as AuthRequest).user?.id;
+        if (!userId) return res.status(401).json({ error: 'Not authorized' });
+
+        const { currentPassword, newPassword } = req.body;
+        const user = await User.findById(userId).select('+password');
+        if (!user) return res.status(401).json({ error: 'User not found' });
+
+        if (user.password) {
+            if (!currentPassword) return res.status(401).json({ error: 'Current password is required' });
+
+            const isMatch = await user.comparePassword(currentPassword);
+            if (!isMatch) return res.status(401).json({ error: 'Current password is incorrect' });
+        }
+
+        user.password = await bcrypt.hash(newPassword, 10);
+        await user.save();
+
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: 'Change password failed' });
+    }
+};
+
+export const socialAuthCallback = async (req: Request & { user?: any }, res: Response) => {
+    try {
+        const user = req.user;
+
+        const token = jwt.sign(
+            { id: user._id, email: user.email },
+            JWT_SECRET_KEY,
+            { expiresIn: '7d' }
+        );
+
+        const responseData = {
+            message: "Login successful",
+            user: {
+                id: user._id,
+                name: user.name,
+                email: user.email,
+                role: user.role,
+                avatar: user.avatar,
+                subscriptionStatus: user.subscriptionStatus,
+                subscriptionPlan: user.subscriptionPlan,
+                hasPassword: !!user.password,
+                twoFAEnabled: user.twoFAEnabled
+            },
+            token,
+        };
+
+        const encodedData = encodeURIComponent(JSON.stringify(responseData));
+        res.redirect(`${process.env.FRONTEND_BASE_URL}/social-callback?data=${encodedData}`);
+    } catch (err) {
+        res.status(500).json({ error: 'Social authentication failed' });
+    }
+};
+
+export const getMe = async (req: Request, res: Response) => {
+    try {
+        const userId = (req as AuthRequest).user?.id;
+        if (!userId) return res.status(401).json({ error: 'Not authorized' });
+
+        const user = await User.findById(userId).select('+password');
+        if (!user) return res.status(404).json({ message: "User not found" });
+
+        // Populate referrals with basic info
+        const populatedUser = await user.populate({
+            path: 'referrals',
+            select: 'name email _id',
+        });
+
+        res.json({
+            id: user._id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            avatar: user.avatar,
+            subscriptionStatus: user.subscriptionStatus,
+            subscriptionPlan: user.subscriptionPlan,
+            hasPassword: !!user.password,
+            twoFAEnabled: user.twoFAEnabled,
+            referralCode: user.referralCode,
+            referredBy: user.referredBy,
+            referrals: populatedUser.referrals,
+            referralRewards: user.referralRewards,
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Get your infomation failed' });
+    }
 };
