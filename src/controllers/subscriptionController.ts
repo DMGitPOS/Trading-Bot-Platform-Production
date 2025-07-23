@@ -37,6 +37,8 @@ export const createCheckoutSession = async (req: Request, res: Response) => {
             await User.findByIdAndUpdate(user.id, { stripeCustomerId });
         }
 
+        const baseUrl = process.env.FRONTEND_BASE_URL?.trim();
+
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
             mode: 'subscription',
@@ -47,8 +49,8 @@ export const createCheckoutSession = async (req: Request, res: Response) => {
                     quantity: 1,
                 },
             ],
-            success_url: `${process.env.FRONTEND}/subscription?session_id={CHECKOUT_SESSION_ID}`,
-            cancel_url: `${process.env.FRONTEND}/subscription?canceled=1`,
+            success_url: `${baseUrl}/subscription?session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: `${baseUrl}/subscription?canceled=1`,
         });
 
         res.status(201).json({ url: session.url });
@@ -163,7 +165,7 @@ export const createPortalSession = async (req: Request, res: Response) => {
 
         const portalSession = await stripe.billingPortal.sessions.create({
             customer: user.stripeCustomerId,
-            return_url: `${process.env.FRONTEND}/dashboard/subscription?refresh=true`,
+            return_url: `${process.env.FRONTEND_BASE_URL}/subscription?refresh=true`,
         });
         res.status(201).json({ url: portalSession.url });
     } catch (err) {

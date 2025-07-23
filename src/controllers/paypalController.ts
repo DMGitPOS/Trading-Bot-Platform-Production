@@ -43,8 +43,8 @@ export const createPayment = async (req: Request, res: Response) => {
             intent: "sale",
             payer: { payment_method: "paypal" },
             redirect_urls: {
-                return_url: `${process.env.FRONTEND}/subscription?paypal=success`,
-                cancel_url: `${process.env.FRONTEND}/subscription?paypal=cancel`,
+                return_url: `${process.env.FRONTEND_BASE_URL}/subscription?paypal=success`,
+                cancel_url: `${process.env.FRONTEND_BASE_URL}/subscription?paypal=cancel`,
             },
             transactions: [
                 {
