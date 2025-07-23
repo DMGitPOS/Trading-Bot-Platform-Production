@@ -16,7 +16,10 @@ import {
     backtestBotStrategy,
     getBotStatus,
     getBotOpenPositions,
-    getUserTrades
+    getUserTrades,
+    getManualTradeSignals,
+    approveManualTradeSignal,
+    rejectManualTradeSignal
 } from '../controllers/botController';
 import { authenticateJWT } from '../middleware/auth';
 
@@ -41,5 +44,10 @@ router.get('/trades', authenticateJWT, getUserTrades);
 router.put('/:id/paper-config', authenticateJWT, updatePaperTradingConfig);
 router.get('/:id/paper-trades', authenticateJWT, getPaperTrades);
 router.get('/:id/paper-stats', authenticateJWT, getPaperTradingStats);
+
+// Manual trade signal endpoints
+router.get('/manual-trade-signals', authenticateJWT, getManualTradeSignals);
+router.post('/manual-trade-signals/:id/approve', authenticateJWT, approveManualTradeSignal);
+router.post('/manual-trade-signals/:id/reject', authenticateJWT, rejectManualTradeSignal);
 
 export default router;

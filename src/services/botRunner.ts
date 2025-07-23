@@ -6,8 +6,11 @@ import { Candle } from './strategyEngine';
 import Trade from '../models/Trade';
 import PaperTrade from '../models/PaperTrade';
 import mongoose from 'mongoose';
-import { strategyRegistry } from './strategyEngine';
+import { strategyRegistry, interpretConfigStrategy } from './strategyEngine';
 import { notifyUser } from './notification/notifyUser';
+import ManualTradeSignal from '../models/ManualTradeSignal';
+import Strategy from '../models/Strategy';
+import { VM } from 'vm2';
 
 interface StrategyState {
     lastSignal: 'buy' | 'sell' | null;
@@ -16,6 +19,7 @@ interface StrategyState {
     paperBalance: number;
     dailyPnL: number;
     lastTradeDate: string | null;
+    lastFundingTime?: number; // Track last funding time for funding payments
 }
 
 // In-memory state tracking for each bot (in production, persist in DB or use a distributed queue)
@@ -69,11 +73,46 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
         const exchangeService = ExchangeFactory.createExchange(bot.exchange, credentials);
 
         // --- FUTURES SUPPORT ---
-        const isFutures = bot.strategy?.isFutures || false; // Use from strategy config if present
+        const isFutures = bot.marketType === 'futures';
         let currentPosition = 0;
+        let fundingRate = 0;
+        let nextFundingTime = 0;
         if (isFutures) {
+            // Set leverage if supported by the exchange service
+            if (typeof exchangeService.setLeverage === 'function') {
+                await exchangeService.setLeverage(symbol, bot.leverage || 1);
+            }
             const pos = await exchangeService.getPosition(symbol);
             currentPosition = pos ? pos.positionAmt : 0;
+            // --- FUNDING RATE LOGIC ---
+            if (currentPosition !== 0 && typeof exchangeService.getFundingRate === 'function') {
+                try {
+                    const fundingInfo = await exchangeService.getFundingRate(symbol);
+                    fundingRate = fundingInfo.fundingRate;
+                    nextFundingTime = fundingInfo.nextFundingTime;
+                    // Only apply funding if it's time and we haven't already for this interval
+                    if (!state.lastFundingTime || Date.now() > state.lastFundingTime) {
+                        // Funding payment = position size * funding rate
+                        // Funding rate is per contract, so multiply by position size (signed)
+                        const fundingPayment = currentPosition * fundingRate;
+                        if (fundingPayment !== 0) {
+                            state.dailyPnL += fundingPayment;
+                            // Optionally, notify user
+                            await notifyUser({
+                                userId: bot.user.toString(),
+                                type: 'alert',
+                                message: `Bot ${bot.name}: Funding payment applied: ${fundingPayment.toFixed(8)} (${(fundingRate * 100).toFixed(4)}%) for position ${currentPosition} ${symbol}`,
+                                botName: bot.name,
+                                data: { fundingPayment, fundingRate, position: currentPosition, symbol },
+                            });
+                        }
+                        // Update lastFundingTime to the next funding time
+                        state.lastFundingTime = nextFundingTime;
+                    }
+                } catch (err) {
+                    console.error(`Bot ${bot.name}: Failed to fetch/apply funding rate:`, err);
+                }
+            }
         } else {
             currentPosition = state.position;
         }
@@ -83,14 +122,84 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
         const currentPrice = candles[candles.length - 1]?.close;
 
         // --- DYNAMIC STRATEGY SELECTION ---
-        const strategyName: string = (typeof bot.strategy?.name === 'string' && bot.strategy?.name) ? bot.strategy.name : 'moving_average';
-        const strategyParams = bot.strategy?.parameters || { shortPeriod, longPeriod };
-        const strategyFn = strategyRegistry[strategyName];
-        if (!strategyFn) {
-            throw new Error(`Strategy ${strategyName} not found`);
+        let strategyName: string = (typeof bot.strategy?.name === 'string' && bot.strategy?.name) ? bot.strategy.name : 'moving_average';
+        let strategyParams = bot.strategy?.parameters || { shortPeriod, longPeriod };
+        let signal: 'buy' | 'sell' | null = null;
+        if (bot.strategy?.type === 'custom') {
+            // Fetch custom strategy code from DB
+            try {
+                const customStrategy = await Strategy.findOne({ _id: bot.strategy?.strategyId || bot.strategy?.id || bot.strategy?.name });
+                if (!customStrategy || !customStrategy.code) {
+                    throw new Error('Custom strategy code not found');
+                }
+                // Use vm2 to safely execute user code
+                const vm = new VM({ timeout: 1000, sandbox: {} });
+                // The user code must export a function: module.exports = function(candles, state, params) { ... }
+                const wrapper = `module = {}; exports = {}; ${customStrategy.code}; module.exports`;
+                const userFn = vm.run(wrapper);
+                if (typeof userFn === 'function') {
+                    const result = userFn(candles, state, strategyParams);
+                    if (result === 'buy' || result === 'sell' || result === null) {
+                        signal = result;
+                    } else {
+                        throw new Error('Custom strategy must return "buy", "sell", or null');
+                    }
+                } else {
+                    throw new Error('Custom strategy did not export a function');
+                }
+            } catch (err) {
+                console.error(`Bot ${bot.name}: Failed to execute custom strategy:`, err);
+                await notifyUser({
+                    userId: bot.user.toString(),
+                    type: 'error',
+                    message: `Bot ${bot.name}: Custom strategy execution failed: ${err instanceof Error ? err.message : String(err)}`,
+                    botName: bot.name,
+                });
+                signal = null;
+            }
+        } else if (bot.strategy?.type === 'config') {
+            // Interpret config-based strategy (visual builder)
+            try {
+                const config = bot.strategy?.config && typeof bot.strategy.config === 'object'
+                    ? {
+                        indicators: Array.isArray((bot.strategy.config as any).indicators) ? (bot.strategy.config as any).indicators : [],
+                        rules: Array.isArray((bot.strategy.config as any).rules) ? (bot.strategy.config as any).rules : [],
+                        risk: typeof (bot.strategy.config as any).risk === 'object' ? (bot.strategy.config as any).risk : {},
+                    }
+                    : { indicators: [], rules: [], risk: {} };
+                signal = interpretConfigStrategy(candles, state, config);
+                if (signal !== 'buy' && signal !== 'sell' && signal !== null) {
+                    throw new Error('Config strategy must return "buy", "sell", or null');
+                }
+            } catch (err) {
+                console.error(`Bot ${bot.name}: Failed to interpret config strategy:`, err);
+                await notifyUser({
+                    userId: bot.user.toString(),
+                    type: 'error',
+                    message: `Bot ${bot.name}: Config strategy execution failed: ${err instanceof Error ? err.message : String(err)}`,
+                    botName: bot.name,
+                });
+                signal = null;
+            }
+        } else {
+            // Built-in strategy
+            const strategyFn = strategyRegistry[strategyName];
+            if (!strategyFn) {
+                throw new Error(`Strategy ${strategyName} not found`);
+            }
+            signal = strategyFn(candles, state, strategyParams);
         }
-        const signal = strategyFn(candles, state, strategyParams);
         // --- END DYNAMIC STRATEGY SELECTION ---
+
+        // Position Side logic for futures
+        let finalSignal = signal;
+        if (isFutures) {
+            if (bot.positionSide === 'long' && signal === 'sell') {
+                finalSignal = null; // Block short
+            } else if (bot.positionSide === 'short' && signal === 'buy') {
+                finalSignal = null; // Block long
+            }
+        }
 
         // Remove old moving average signal logic (now handled by strategyFn)
         // let signal: 'buy' | 'sell' | null = null;
@@ -101,13 +210,49 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
         // }
 
         // Check risk limits before executing trades
-        if (!await checkRiskLimits(bot, state, signal, currentPrice, quantity)) {
+        if (!await checkRiskLimits(bot, state, finalSignal, currentPrice, quantity)) {
             console.log(`Bot ${bot.name}: Risk limits exceeded, skipping trade`);
             return;
         }
+        // --- MANUAL MODE SUPPORT ---
+        if (bot.mode === 'manual') {
+            if (finalSignal === 'buy' || finalSignal === 'sell') {
+                // Create a pending manual trade signal in the DB
+                await ManualTradeSignal.create({
+                    user: bot.user,
+                    bot: bot._id,
+                    signal: finalSignal,
+                    symbol,
+                    price: currentPrice,
+                    quantity,
+                    marketType: bot.marketType,
+                    leverage: bot.leverage,
+                    positionSide: bot.positionSide,
+                    status: 'pending',
+                });
+                // Notify user
+                await notifyUser({
+                    userId: bot.user.toString(),
+                    type: 'manual_trade',
+                    message: `Manual trade signal for ${bot.name}: ${finalSignal.toUpperCase()} ${quantity} ${symbol} at ${currentPrice}`,
+                    botName: bot.name,
+                    data: {
+                        signal: finalSignal,
+                        symbol,
+                        quantity,
+                        price: currentPrice,
+                        marketType: bot.marketType,
+                        leverage: bot.leverage,
+                        positionSide: bot.positionSide,
+                    },
+                });
+                // Do not execute the trade automatically
+                return;
+            }
+        }
         // --- FUTURES ORDER EXECUTION ---
         if (isFutures) {
-            if (signal === 'buy' && currentPosition <= 0) {
+            if (finalSignal === 'buy' && currentPosition <= 0) {
                 // Close short if exists, then open long
                 if (currentPosition < 0) {
                     await exchangeService.closePosition(symbol);
@@ -128,7 +273,7 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
                     message: `Bot ${bot.name}: BUY ${quantity} ${symbol} at ${currentPrice}`,
                     botName: bot.name,
                 });
-            } else if (signal === 'sell' && currentPosition > 0) {
+            } else if (finalSignal === 'sell' && currentPosition > 0) {
                 // Close long if exists, then open short
                 await exchangeService.closePosition(symbol);
                 await exchangeService.placeOrder({
@@ -150,7 +295,7 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
             }
         } else {
             // --- SPOT ORDER EXECUTION (existing logic) ---
-            if (signal === 'buy' && state.position === 0) {
+            if (finalSignal === 'buy' && state.position === 0) {
                 if (bot.paperTrading) {
                     await executePaperBuyOrder(bot, symbol, quantity, currentPrice, state);
                 } else {
@@ -166,7 +311,7 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
                     message: `Bot ${bot.name}: BUY ${quantity} ${symbol} at ${currentPrice}`,
                     botName: bot.name,
                 });
-            } else if (signal === 'sell' && state.position > 0) {
+            } else if (finalSignal === 'sell' && state.position > 0) {
                 if (bot.paperTrading) {
                     await executePaperSellOrder(bot, symbol, state.position, currentPrice, state);
                 } else {

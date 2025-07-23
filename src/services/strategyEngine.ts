@@ -52,8 +52,8 @@ export function binanceKlinesToCandles(klines: any[]): Candle[] {
 }
 
 // Simple moving average crossover strategy
-export function runMovingAverageBacktest(candles: Candle[], params: BacktestParams): BacktestResult {
-    const { shortPeriod, longPeriod, quantity, initialBalance } = params;
+export function runMovingAverageBacktest(candles: Candle[], params: any): BacktestResult {
+    const { shortPeriod, longPeriod, quantity, initialBalance, marketType = 'spot', leverage = 1, positionSide = 'both' } = params;
     let balance = initialBalance;
     let position = 0;
     let lastSignal: 'buy' | 'sell' | null = null;
@@ -75,6 +75,7 @@ export function runMovingAverageBacktest(candles: Candle[], params: BacktestPara
         const price = candles[i].close;
         // Buy signal
         if (shortMA > longMA && lastSignal !== 'buy') {
+            if (positionSide === 'short') continue; // Block long
             if (balance >= price * quantity) {
                 balance -= price * quantity;
                 position += quantity;
@@ -84,6 +85,7 @@ export function runMovingAverageBacktest(candles: Candle[], params: BacktestPara
         }
         // Sell signal
         if (shortMA < longMA && lastSignal !== 'sell' && position >= quantity) {
+            if (positionSide === 'long') continue; // Block short
             balance += price * quantity;
             position -= quantity;
             trades.push({ time: candles[i].time, price, side: 'sell', quantity, balance });
@@ -100,7 +102,10 @@ export function runMovingAverageBacktest(candles: Candle[], params: BacktestPara
     }
 
     // Calculate PnL and win rate
-    const pnl = balance - initialBalance;
+    let pnl = balance - initialBalance;
+    if (marketType === 'futures') {
+        pnl *= leverage;
+    }
     let wins = 0, total = 0;
     for (let i = 1; i < trades.length; i += 2) {
         if (trades[i].side === 'sell' && trades[i - 1].side === 'buy') {
@@ -326,8 +331,8 @@ export function calculateStochastic(
  * RSI Strategy Backtest
  * Buy when RSI crosses above oversold level, sell when RSI crosses below overbought level
  */
-export function runRSIBacktest(candles: Candle[], params: RSIBacktestParams): BacktestResult {
-    const { period, overbought, oversold, quantity, initialBalance } = params;
+export function runRSIBacktest(candles: Candle[], params: any): BacktestResult {
+    const { period, overbought, oversold, quantity, initialBalance, marketType = 'spot', leverage = 1, positionSide = 'both' } = params;
     let balance = initialBalance;
     let position = 0;
     let lastSignal: 'buy' | 'sell' | null = null;
@@ -354,10 +359,12 @@ export function runRSIBacktest(candles: Candle[], params: RSIBacktestParams): Ba
 
         // Buy signal: RSI crosses above oversold level
         if (currentRSI > oversold && lastSignal !== 'buy' && position === 0) {
+            if (positionSide === 'short') continue; // Block long
             signal = 'buy';
         }
         // Sell signal: RSI crosses below overbought level
         else if (currentRSI < overbought && lastSignal !== 'sell' && position > 0) {
+            if (positionSide === 'long') continue; // Block short
             signal = 'sell';
         }
 
@@ -402,7 +409,10 @@ export function runRSIBacktest(candles: Candle[], params: RSIBacktestParams): Ba
     }
 
     // Calculate PnL and win rate
-    const pnl = balance - initialBalance;
+    let pnl = balance - initialBalance;
+    if (marketType === 'futures') {
+        pnl *= leverage;
+    }
     let wins = 0, total = 0;
     for (let i = 1; i < trades.length; i += 2) {
         if (trades[i].side === 'sell' && trades[i - 1].side === 'buy') {
@@ -534,4 +544,69 @@ export function runStrategyBacktest(
     }
     const winRate = total > 0 ? wins / total : 0;
     return { trades, pnl, winRate, finalBalance: balance };
+} 
+
+/**
+ * Interpret a config-based strategy (visual builder)
+ * @param candles Array of Candle objects
+ * @param state Bot state (lastSignal, etc.)
+ * @param config { indicators: [...], rules: [...], risk: {...} }
+ * @returns 'buy' | 'sell' | null
+ */
+export function interpretConfigStrategy(
+    candles: Candle[],
+    state: any,
+    config: { indicators: any[]; rules: any[]; risk: any }
+): 'buy' | 'sell' | null {
+    // 1. Compute indicator values
+    const indicatorValues: Record<string, any> = {};
+    for (const ind of config.indicators) {
+        const closes = candles.map(c => c.close);
+        if (ind.type === 'SMA') {
+            indicatorValues[`SMA_${ind.id}`] = calculateSMA(closes, ind.params.period);
+        } else if (ind.type === 'EMA') {
+            const emaArr = calculateEMA(closes, ind.params.period);
+            indicatorValues[`EMA_${ind.id}`] = emaArr.length > 0 ? emaArr[emaArr.length - 1] : null;
+        } else if (ind.type === 'RSI') {
+            const rsiArr = calculateRSI(closes, ind.params.period);
+            indicatorValues[`RSI_${ind.id}`] = rsiArr.length > 0 ? rsiArr[rsiArr.length - 1] : null;
+        } else if (ind.type === 'MACD') {
+            const macd = calculateMACD(closes, ind.params.fast, ind.params.slow, ind.params.signal);
+            indicatorValues[`MACD_${ind.id}`] = macd.macd.length > 0 ? macd.macd[macd.macd.length - 1] : null;
+        } else if (ind.type === 'BollingerBands') {
+            const bb = calculateBollingerBands(closes, ind.params.period, ind.params.stdDev);
+            indicatorValues[`BB_upper_${ind.id}`] = bb.upper.length > 0 ? bb.upper[bb.upper.length - 1] : null;
+            indicatorValues[`BB_middle_${ind.id}`] = bb.middle.length > 0 ? bb.middle[bb.middle.length - 1] : null;
+            indicatorValues[`BB_lower_${ind.id}`] = bb.lower.length > 0 ? bb.lower[bb.lower.length - 1] : null;
+        }
+    }
+    // 2. Evaluate rules (simple parser: replace indicator names with values, eval condition)
+    for (const rule of config.rules) {
+        let cond = rule.condition;
+        // Replace indicator references in the condition string
+        for (const ind of config.indicators) {
+            const key = `${ind.type}_${ind.id}`;
+            cond = cond.replaceAll(`${ind.type}(${ind.params.period || ind.params.fast || ind.params.slow || ind.params.signal || ind.params.stdDev || ''})`, indicatorValues[key]);
+            cond = cond.replaceAll(key, indicatorValues[key]);
+        }
+        // Also support BB_upper, BB_middle, BB_lower
+        for (const ind of config.indicators.filter(i => i.type === 'BollingerBands')) {
+            cond = cond.replaceAll(`BB_upper_${ind.id}`, indicatorValues[`BB_upper_${ind.id}`]);
+            cond = cond.replaceAll(`BB_middle_${ind.id}`, indicatorValues[`BB_middle_${ind.id}`]);
+            cond = cond.replaceAll(`BB_lower_${ind.id}`, indicatorValues[`BB_lower_${ind.id}`]);
+        }
+        // Evaluate the condition (safe eval)
+        try {
+            // Only allow numbers, operators, and parentheses
+            if (/^[0-9.\s><=+\-*/()]+$/.test(cond)) {
+                // eslint-disable-next-line no-eval
+                if (eval(cond)) {
+                    return rule.action;
+                }
+            }
+        } catch (e) {
+            // Ignore invalid rule
+        }
+    }
+    return null;
 } 

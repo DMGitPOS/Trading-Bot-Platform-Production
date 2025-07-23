@@ -15,11 +15,22 @@ import { Candle } from '../strategyEngine';
 export class BinanceService implements ExchangeService {
     private client: Spot;
     private credentials: ExchangeCredentials;
-    private futuresBaseUrl = 'https://fapi.binance.com';
+    private futuresBaseUrl: string;
+    private useTestnet: boolean;
 
-    constructor(credentials: ExchangeCredentials) {
+    constructor(credentials: ExchangeCredentials, useTestnet: boolean = false) {
         this.credentials = credentials;
-        this.client = new Spot(credentials.apiKey, credentials.apiSecret);
+        this.useTestnet = useTestnet;
+        if (useTestnet) {
+            // Spot Testnet endpoint
+            this.client = new Spot(credentials.apiKey, credentials.apiSecret, {
+                baseURL: 'https://testnet.binance.vision'
+            });
+            this.futuresBaseUrl = 'https://testnet.binancefuture.com';
+        } else {
+            this.client = new Spot(credentials.apiKey, credentials.apiSecret);
+            this.futuresBaseUrl = 'https://fapi.binance.com';
+        }
     }
 
     getExchangeName(): string {
@@ -136,11 +147,7 @@ export class BinanceService implements ExchangeService {
 
     async validateCredentials(credentials: ExchangeCredentials): Promise<boolean> {
         try {
-            console.log(credentials)
             const testClient = new Spot(credentials.apiKey, credentials.apiSecret);
-            console.log(testClient)
-            const ss = await testClient.accountInfo();
-            console.log(ss);
             await testClient.accountInformation();
             return true;
         } catch (error) {

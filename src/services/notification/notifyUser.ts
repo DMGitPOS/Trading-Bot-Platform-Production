@@ -11,13 +11,14 @@ interface NotifyUserOptions {
     type: string;
     message: string;
     botName?: string;
+    data?: Record<string, any>;
 }
 
 /**
  * Store a notification and send to all enabled channels for a user
  */
 export async function notifyUser(options: NotifyUserOptions): Promise<void> {
-    const { userId, type, message, botName } = options;
+    const { userId, type, message, botName, data } = options;
 
     // 1. Store notification in DB
     await Notification.create({
@@ -26,6 +27,7 @@ export async function notifyUser(options: NotifyUserOptions): Promise<void> {
         message,
         botName,
         timestamp: new Date(),
+        data,
     });
 
     // 2. Fetch preferences and user info

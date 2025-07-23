@@ -13,6 +13,9 @@ import { runRSIBacktest, RSIBacktestParams } from '../services/strategyEngine';
 import { runStrategyBacktest } from '../services/strategyEngine';
 import { decrypt } from '../utils/crypto';
 import { AuthRequest } from "../middleware/auth";
+import ManualTradeSignal from '../models/ManualTradeSignal';
+import { runBot } from '../services/botRunner';
+import Strategy from '../models/Strategy';
 
 const createBotSchema = Joi.object({
     name: Joi.string().min(2).max(50).required(),
@@ -30,6 +33,12 @@ const createBotSchema = Joi.object({
         stopLoss: Joi.number().min(0).optional(),
         takeProfit: Joi.number().min(0).optional(),
     }).optional(),
+    marketType: Joi.string().valid('spot', 'futures').default('spot'),
+    leverage: Joi.number().min(1).max(125).default(1),
+    positionSide: Joi.string().valid('both', 'long', 'short').default('both'),
+    useTestnet: Joi.boolean().optional(),
+    testnetApiKeyRef: Joi.string().optional(),
+    mode: Joi.string().valid('auto', 'manual').default('auto'),
 });
 
 const updateBotSchema = Joi.object({
@@ -46,6 +55,12 @@ const updateBotSchema = Joi.object({
         stopLoss: Joi.number().min(0).optional(),
         takeProfit: Joi.number().min(0).optional(),
     }).optional(),
+    marketType: Joi.string().valid('spot', 'futures').optional(),
+    leverage: Joi.number().min(1).max(125).optional(),
+    positionSide: Joi.string().valid('both', 'long', 'short').optional(),
+    useTestnet: Joi.boolean().optional(),
+    testnetApiKeyRef: Joi.string().optional(),
+    mode: Joi.string().valid('auto', 'manual').optional(),
 });
 
 const updatePaperTradingConfigSchema = Joi.object({
@@ -73,6 +88,9 @@ const movingAverageBacktestSchema = Joi.object({
     interval: Joi.string().required(),
     limit: Joi.number().integer().min(1).optional(),
     exchange: Joi.string().optional(),
+    marketType: Joi.string().valid('spot', 'futures').default('spot'),
+    leverage: Joi.number().min(1).max(125).default(1),
+    positionSide: Joi.string().valid('both', 'long', 'short').default('both'),
 });
 
 const rsiBacktestSchema = Joi.object({
@@ -86,13 +104,20 @@ const rsiBacktestSchema = Joi.object({
     interval: Joi.string().required(),
     limit: Joi.number().integer().min(1).optional(),
     exchange: Joi.string().optional(),
+    marketType: Joi.string().valid('spot', 'futures').default('spot'),
+    leverage: Joi.number().min(1).max(125).default(1),
+    positionSide: Joi.string().valid('both', 'long', 'short').default('both'),
 });
 
 // Joi schema for backtestBotStrategy
 const backtestBotStrategySchema = Joi.object({
     strategyName: Joi.string().required(),
     candles: Joi.array().min(1).required(),
-    params: Joi.object().optional(),
+    params: Joi.object({
+        marketType: Joi.string().valid('spot', 'futures').default('spot'),
+        leverage: Joi.number().min(1).max(125).default(1),
+        positionSide: Joi.string().valid('both', 'long', 'short').default('both'),
+    }).optional(),
     initialBalance: Joi.number().optional(),
 });
 
@@ -101,13 +126,66 @@ export const createBot = async (req: Request, res: Response) => {
         const { error } = createBotSchema.validate(req.body);
         if (error) return res.status(400).json({ error: error.details[0].message });
 
+        // Additional backend validation for marketType/leverage
+        const { marketType: reqMarketType, leverage: reqLeverage, strategy } = req.body;
+        if (reqMarketType === 'futures') {
+            if (!reqLeverage || reqLeverage < 1 || reqLeverage > 125) {
+                return res.status(400).json({ error: 'Leverage must be between 1 and 125 for futures.' });
+            }
+        } else if (reqMarketType === 'spot') {
+            if (reqLeverage !== 1) {
+                return res.status(400).json({ error: 'Leverage must be 1 for spot trading.' });
+            }
+        }
+
+        // --- STRATEGY VALIDATION ---
+        if (!strategy || typeof strategy !== 'object' || !strategy.type) {
+            return res.status(400).json({ error: 'Strategy is required and must have a type.' });
+        }
+        if (strategy.type === 'custom') {
+            // Must provide a valid strategyId or name
+            const strategyId = strategy.strategyId || strategy.id || strategy.name;
+            if (!strategyId) {
+                return res.status(400).json({ error: 'Custom strategy must reference a valid strategyId or name.' });
+            }
+            const userId = (req as AuthRequest).user?.id;
+            const customStrategy = await Strategy.findOne({ $or: [ { _id: strategyId }, { name: strategyId } ], user: userId });
+            if (!customStrategy) {
+                return res.status(400).json({ error: 'Referenced custom strategy not found or not owned by user.' });
+            }
+            if (customStrategy.type !== 'custom' || !customStrategy.code) {
+                return res.status(400).json({ error: 'Referenced strategy is not a valid custom strategy.' });
+            }
+        } else if (strategy.type === 'config') {
+            // Must provide config with indicators and rules arrays
+            if (!strategy.config || typeof strategy.config !== 'object') {
+                return res.status(400).json({ error: 'Config strategy must include a config object.' });
+            }
+            if (!Array.isArray(strategy.config.indicators) || !Array.isArray(strategy.config.rules)) {
+                return res.status(400).json({ error: 'Config strategy must include indicators and rules arrays.' });
+            }
+        } else {
+            // Built-in strategies: check required parameters
+            if (!strategy.parameters || typeof strategy.parameters !== 'object') {
+                return res.status(400).json({ error: 'Strategy parameters are required.' });
+            }
+            if (strategy.type === 'moving_average') {
+                const { symbol, shortPeriod, longPeriod, quantity } = strategy.parameters;
+                if (!symbol || !shortPeriod || !longPeriod || !quantity) {
+                    return res.status(400).json({ error: 'Missing required strategy parameters: symbol, shortPeriod, longPeriod, quantity' });
+                }
+            }
+            // Add more built-in strategy validations as needed
+        }
+        // --- END STRATEGY VALIDATION ---
+
         const userId = (req as AuthRequest).user?.id;
         if (!userId) return res.status(401).json({ error: 'Not authorized' });
 
-        const { name, exchange, apiKeyRef, strategy, paperTrading, paperBalance, riskLimits } = req.body;
+        const { name, exchange, apiKeyRef, strategy: strategyFromBody, paperTrading, paperBalance, riskLimits, marketType, leverage, positionSide, useTestnet, testnetApiKeyRef, mode } = req.body;
   
-        if (strategy.type === 'moving_average') {
-            const { symbol, shortPeriod, longPeriod, quantity } = strategy.parameters;
+        if (strategyFromBody.type === 'moving_average') {
+            const { symbol, shortPeriod, longPeriod, quantity } = strategyFromBody.parameters;
             if (!symbol || !shortPeriod || !longPeriod || !quantity) {
                 return res.status(400).json({ error: 'Missing required strategy parameters: symbol, shortPeriod, longPeriod, quantity' });
             }
@@ -145,7 +223,7 @@ export const createBot = async (req: Request, res: Response) => {
             name,
             exchange,
             apiKeyRef,
-            strategy,
+            strategy: strategyFromBody,
             paperTrading: paperTrading !== undefined ? paperTrading : true, // Default to paper trading
             paperBalance: paperBalance || 10000, // Default $10,000
             riskLimits: {
@@ -155,6 +233,12 @@ export const createBot = async (req: Request, res: Response) => {
                 takeProfit: riskLimits?.takeProfit || 10,
             },
             status: 'stopped',
+            marketType: marketType,
+            leverage: leverage,
+            positionSide: positionSide,
+            useTestnet: useTestnet || false,
+            testnetApiKeyRef: testnetApiKeyRef || undefined,
+            mode: mode || 'auto',
         });
         await bot.save();
         res.status(201).json(bot);
@@ -194,15 +278,67 @@ export const updateBot = async (req: Request, res: Response) => {
         const { error } = updateBotSchema.validate(req.body);
         if (error) return res.status(400).json({ error: error.details[0].message });
 
+        // Additional backend validation for marketType/leverage
+        const { marketType: reqMarketType, leverage: reqLeverage, strategy } = req.body;
+        if (reqMarketType === 'futures') {
+            if (reqLeverage !== undefined && (reqLeverage < 1 || reqLeverage > 125)) {
+                return res.status(400).json({ error: 'Leverage must be between 1 and 125 for futures.' });
+            }
+        } else if (reqMarketType === 'spot') {
+            if (reqLeverage !== undefined && reqLeverage !== 1) {
+                return res.status(400).json({ error: 'Leverage must be 1 for spot trading.' });
+            }
+        }
+
+        // --- STRATEGY VALIDATION ---
+        if (strategy) {
+            if (!strategy.type) {
+                return res.status(400).json({ error: 'Strategy type is required.' });
+            }
+            if (strategy.type === 'custom') {
+                const strategyId = strategy.strategyId || strategy.id || strategy.name;
+                if (!strategyId) {
+                    return res.status(400).json({ error: 'Custom strategy must reference a valid strategyId or name.' });
+                }
+                const userId = (req as AuthRequest).user?.id;
+                const customStrategy = await Strategy.findOne({ $or: [ { _id: strategyId }, { name: strategyId } ], user: userId });
+                if (!customStrategy) {
+                    return res.status(400).json({ error: 'Referenced custom strategy not found or not owned by user.' });
+                }
+                if (customStrategy.type !== 'custom' || !customStrategy.code) {
+                    return res.status(400).json({ error: 'Referenced strategy is not a valid custom strategy.' });
+                }
+            } else if (strategy.type === 'config') {
+                if (!strategy.config || typeof strategy.config !== 'object') {
+                    return res.status(400).json({ error: 'Config strategy must include a config object.' });
+                }
+                if (!Array.isArray(strategy.config.indicators) || !Array.isArray(strategy.config.rules)) {
+                    return res.status(400).json({ error: 'Config strategy must include indicators and rules arrays.' });
+                }
+            } else {
+                if (!strategy.parameters || typeof strategy.parameters !== 'object') {
+                    return res.status(400).json({ error: 'Strategy parameters are required.' });
+                }
+                if (strategy.type === 'moving_average') {
+                    const { symbol, shortPeriod, longPeriod, quantity } = strategy.parameters;
+                    if (!symbol || !shortPeriod || !longPeriod || !quantity) {
+                        return res.status(400).json({ error: 'Missing required strategy parameters: symbol, shortPeriod, longPeriod, quantity' });
+                    }
+                }
+                // Add more built-in strategy validations as needed
+            }
+        }
+        // --- END STRATEGY VALIDATION ---
+
         const userId = (req as AuthRequest).user?.id;
         if (!userId) return res.status(401).json({ error: 'Not authorized' });
         
         const botId = req.params.id;
-        const { name, strategy, paperTrading, paperBalance, riskLimits } = req.body;
+        const { name, strategy: strategyFromBody, paperTrading, paperBalance, riskLimits, marketType, leverage, positionSide, useTestnet, testnetApiKeyRef, mode } = req.body;
         
         // Extra validation for moving_average strategy parameters
-        if (strategy && strategy.type === 'moving_average') {
-            const { symbol, shortPeriod, longPeriod, quantity } = strategy.parameters;
+        if (strategyFromBody && strategyFromBody.type === 'moving_average') {
+            const { symbol, shortPeriod, longPeriod, quantity } = strategyFromBody.parameters;
             if (!symbol || !shortPeriod || !longPeriod || !quantity) {
                 return res.status(400).json({ error: 'Missing required strategy parameters: symbol, shortPeriod, longPeriod, quantity' });
             }
@@ -214,7 +350,7 @@ export const updateBot = async (req: Request, res: Response) => {
         }
 
         if (name) bot.name = name;
-        if (strategy) bot.strategy = strategy;
+        if (strategyFromBody) bot.strategy = strategyFromBody;
         if (paperTrading !== undefined) bot.paperTrading = paperTrading;
         if (paperBalance !== undefined) bot.paperBalance = paperBalance;
         if (riskLimits) {
@@ -223,6 +359,12 @@ export const updateBot = async (req: Request, res: Response) => {
                 ...riskLimits,
             };
         }
+        if (marketType !== undefined) bot.marketType = marketType;
+        if (leverage !== undefined) bot.leverage = leverage;
+        if (positionSide !== undefined) bot.positionSide = positionSide;
+        if (useTestnet !== undefined) bot.useTestnet = useTestnet;
+        if (testnetApiKeyRef !== undefined) bot.testnetApiKeyRef = testnetApiKeyRef;
+        if (mode !== undefined) bot.mode = mode;
         
         await bot.save();
         res.status(201).json(bot);
@@ -462,7 +604,10 @@ export const backtestBot = async (req: Request, res: Response) => {
             exchange = 'binance',
             period,
             overbought,
-            oversold
+            oversold,
+            marketType = 'spot',
+            leverage = 1,
+            positionSide = 'both',
         } = req.body;
 
         // Create exchange service for backtesting (using public endpoints)
@@ -475,25 +620,37 @@ export const backtestBot = async (req: Request, res: Response) => {
         const candles = await exchangeService.fetchKlines(symbol, interval, limit || 100);
 
         let result;
-
         if (strategy === 'moving_average') {
             // Run moving average backtest
-            const params: BacktestParams = { symbol, shortPeriod, longPeriod, quantity, initialBalance };
-            result = runMovingAverageBacktest(candles, params);
+            const maParams = {
+                symbol,
+                shortPeriod,
+                longPeriod,
+                quantity,
+                initialBalance,
+                marketType,
+                leverage,
+                positionSide,
+            };
+            result = runMovingAverageBacktest(candles, maParams);
         } else if (strategy === 'rsi') {
             // Run RSI backtest
-            const params: RSIBacktestParams = {
+            const rsiParams = {
                 symbol,
                 period,
                 overbought,
                 oversold,
                 quantity,
-                initialBalance
+                initialBalance,
+                marketType,
+                leverage,
+                positionSide,
             };
-            result = runRSIBacktest(candles, params);
+            result = runRSIBacktest(candles, rsiParams);
         }
 
-        res.status(201).json(result);
+        // Return the params for confirmation (for now)
+        res.status(201).json({ ...result, marketType, leverage, positionSide });
     } catch (error) {
         res.status(500).json({ error: 'Backtest failed' });
     }
@@ -511,7 +668,12 @@ export const testBotRun = async (req: Request, res: Response) => {
         const bot = await Bot.findOne({ _id: botId, user: userId });
         if (!bot) return res.status(404).json({ error: 'Bot not found' });
         
-        const apiKey = await ApiKey.findById(bot.apiKeyRef);
+        let apiKey;
+        if (bot.useTestnet && bot.testnetApiKeyRef) {
+            apiKey = await ApiKey.findById(bot.testnetApiKeyRef);
+        } else {
+            apiKey = await ApiKey.findById(bot.apiKeyRef);
+        }
         if (!apiKey) return res.status(400).json({ error: 'API key not found' });
         
         // Import and run the bot
@@ -720,7 +882,12 @@ export const getBotOpenPositions = async (req: Request, res: Response) => {
         if (!bot) return res.status(404).json({ error: 'Bot not found' });
 
 
-        const apiKey = await ApiKey.findOne({ _id: bot.apiKeyRef, user: userId });
+        let apiKey;
+        if (bot.useTestnet && bot.testnetApiKeyRef) {
+            apiKey = await ApiKey.findOne({ _id: bot.testnetApiKeyRef, user: userId });
+        } else {
+            apiKey = await ApiKey.findOne({ _id: bot.apiKeyRef, user: userId });
+        }
         if (!apiKey) return res.status(400).json({ error: 'API key not found' });
 
         const credentials = {
@@ -729,7 +896,7 @@ export const getBotOpenPositions = async (req: Request, res: Response) => {
             passphrase: (apiKey as any).passphrase,
         };
         const symbol = (bot.strategy?.parameters as any)?.symbol;
-        const exchangeService = ExchangeFactory.createExchange(bot.exchange, credentials);
+        const exchangeService = ExchangeFactory.createExchange(bot.exchange, credentials, bot.useTestnet);
     
         if (bot.strategy?.isFutures) {
             // Futures: return open positions for the bot's symbol
@@ -774,5 +941,77 @@ export const getUserTrades = async (req: Request, res: Response) => {
         });
     } catch (err) {
         res.status(500).json({ error: 'Get your infomation failed' });
+    }
+};
+
+// Fetch all pending manual trade signals for the authenticated user
+export const getManualTradeSignals = async (req: Request, res: Response) => {
+    try {
+        const userId = (req as AuthRequest).user?.id;
+        if (!userId) return res.status(401).json({ error: 'Not authorized' });
+
+        const signals = await ManualTradeSignal.find({ user: userId, status: 'pending' }).populate('bot');
+
+        res.status(200).json(signals);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch manual trade signals' });
+    }
+};
+
+// Approve and execute a manual trade signal
+export const approveManualTradeSignal = async (req: Request, res: Response) => {
+    try {
+        const userId = (req as AuthRequest).user?.id;
+        if (!userId) return res.status(401).json({ error: 'Not authorized' });
+        const signalId = req.params.id;
+        const signal = await ManualTradeSignal.findOne({ _id: signalId, user: userId, status: 'pending' }).populate('bot');
+        if (!signal) return res.status(404).json({ error: 'Manual trade signal not found' });
+        // Mark as approved
+        signal.status = 'approved';
+        await signal.save();
+        // Execute the trade (reuse runBot or direct logic)
+        // For simplicity, call runBot with a special flag or implement direct execution here
+        // (Assume bot and apiKey are available)
+        const bot = signal.bot as any;
+        let apiKey;
+        if (bot.useTestnet && bot.testnetApiKeyRef) {
+            apiKey = await ApiKey.findById(bot.testnetApiKeyRef);
+        } else {
+            apiKey = await ApiKey.findById(bot.apiKeyRef);
+        }
+        if (!apiKey) return res.status(400).json({ error: 'API key not found' });
+        // Place the order directly (simplified)
+        const credentials = {
+            apiKey: decrypt(apiKey.apiKey),
+            apiSecret: decrypt(apiKey.apiSecret),
+        };
+        const exchangeService = ExchangeFactory.createExchange(bot.exchange, credentials, bot.useTestnet);
+        await exchangeService.placeOrder({
+            symbol: signal.symbol,
+            side: signal.signal,
+            type: 'market',
+            quantity: signal.quantity,
+        });
+        signal.status = 'executed';
+        await signal.save();
+        res.status(200).json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to approve/execute manual trade signal' });
+    }
+};
+
+// Reject a manual trade signal
+export const rejectManualTradeSignal = async (req: Request, res: Response) => {
+    try {
+        const userId = (req as AuthRequest).user?.id;
+        if (!userId) return res.status(401).json({ error: 'Not authorized' });
+        const signalId = req.params.id;
+        const signal = await ManualTradeSignal.findOne({ _id: signalId, user: userId, status: 'pending' });
+        if (!signal) return res.status(404).json({ error: 'Manual trade signal not found' });
+        signal.status = 'rejected';
+        await signal.save();
+        res.status(200).json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to reject manual trade signal' });
     }
 };

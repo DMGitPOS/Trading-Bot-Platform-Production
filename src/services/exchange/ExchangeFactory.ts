@@ -4,10 +4,12 @@ import { CoinbaseService } from './CoinbaseService';
 import { KrakenService } from './KrakenService';
 
 export class ExchangeFactory {
-    static createExchange(exchangeName: string, credentials: ExchangeCredentials): ExchangeService {
+    static createExchange(exchangeName: string, credentials: ExchangeCredentials, useTestnet: boolean = false): ExchangeService {
         switch (exchangeName.toLowerCase()) {
             case 'binance':
-                return new BinanceService(credentials);
+                return new BinanceService(credentials, false);
+            case 'binance_testnet':
+                return new BinanceService(credentials, true);
             case 'coinbase':
                 return new CoinbaseService(credentials);
             case 'kraken':
@@ -19,6 +21,6 @@ export class ExchangeFactory {
     }
 
     static getSupportedExchanges(): string[] {
-        return ['binance', 'coinbase', 'kraken']; // Add more as implemented
+        return ['binance', 'binance_testnet', 'coinbase', 'kraken']; // Add more as implemented
     }
 } 

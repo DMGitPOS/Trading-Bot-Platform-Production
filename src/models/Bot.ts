@@ -22,6 +22,12 @@ export interface IBot extends Document {
         stopLoss: number; // percentage
         takeProfit: number; // percentage
     };
+    marketType: 'spot' | 'futures';
+    leverage: number;
+    positionSide: 'both' | 'long' | 'short';
+    useTestnet?: boolean;
+    testnetApiKeyRef?: mongoose.Types.ObjectId;
+    mode: 'auto' | 'manual';
     createdAt: Date;
     updatedAt: Date;
 }
@@ -48,6 +54,12 @@ const BotSchema = new Schema<IBot>({
         stopLoss: { type: Number, default: 5 }, // 5% stop loss
         takeProfit: { type: Number, default: 10 }, // 10% take profit
     },
+    marketType: { type: String, enum: ['spot', 'futures'], default: 'spot', required: true },
+    leverage: { type: Number, default: 1, required: true },
+    positionSide: { type: String, enum: ['both', 'long', 'short'], default: 'both', required: true },
+    useTestnet: { type: Boolean, default: false },
+    testnetApiKeyRef: { type: Schema.Types.ObjectId, ref: 'ApiKey' },
+    mode: { type: String, enum: ['auto', 'manual'], default: 'auto' },
 }, { timestamps: true });
 
 export default mongoose.model<IBot>('Bot', BotSchema); 

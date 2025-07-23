@@ -10,6 +10,7 @@ import supportTicketsRoutes from './supportTickets.routes';
 import referralsRoutes from './referrals.routes';
 import notificationsRoutes from './notifications.routes';
 import usersRoutes from './users.routes';
+import strategyRoutes from './strategy.routes';
 
 const router = express.Router();
 
@@ -24,5 +25,6 @@ router.use('/referrals', referralsRoutes);
 router.use('/support-tickets', supportTicketsRoutes);
 router.use('/notifications', notificationsRoutes);
 router.use('/users', usersRoutes);
+router.use('/strategies', strategyRoutes);
 
 export default router;
