@@ -47,9 +47,9 @@ export async function notifyUser(options: NotifyUserOptions): Promise<void> {
             )
         );
     }
-    if (pref.telegram && pref.telegramChatId && process.env.TELEGRAM_BOT_TOKEN) {
+    if (pref.telegram) {
         promises.push(
-            sendTelegramMessage(process.env.TELEGRAM_BOT_TOKEN, pref.telegramChatId, message)
+            sendTelegramMessage(message)
         );
     }
     if (pref.discord && pref.discordWebhook) {

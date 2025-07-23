@@ -104,7 +104,9 @@ export const enable2FA = async (
             `Your backup codes for two-factor authentication:\n\n${plainCodes.join('\n')}\n\nKeep these codes safe and secure. Each code can only be used once.`
         );
 
-        res.status(201).json({ success: true });
+        res.json({
+            backupCodes: plainCodes
+          });
     } catch (error) {
         res.status(500).json({ message: 'Enable 2FA failed' });
     }
@@ -152,6 +154,7 @@ export const verify2FA = async (
                 email: user.email,
                 avatar: user.avatar,
                 role: user.role,
+                referralCode: user.referralCode,
                 subscriptionStatus: user.subscriptionStatus,
                 subscriptionPlan: user.subscriptionPlan,
                 hasPassword: !!user.password,
@@ -256,6 +259,7 @@ export const verifyBackupCode = async (
                 email: user.email,
                 avatar: user.avatar,
                 role: user.role,
+                referralCode: user.referralCode,
                 subscriptionStatus: user.subscriptionStatus,
                 subscriptionPlan: user.subscriptionPlan,
                 hasPassword: !!user.password,

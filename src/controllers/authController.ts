@@ -177,7 +177,8 @@ export const login = async (req: Request, res: Response) => {
                 subscriptionStatus: user.subscriptionStatus,
                 subscriptionPlan: user.subscriptionPlan,
                 hasPassword: !!user.password,
-                twoFAEnabled: user.twoFAEnabled
+                twoFAEnabled: user.twoFAEnabled,
+                referralCode: user.referralCode
             },
         });
     } catch (err) {
@@ -385,6 +386,7 @@ export const socialAuthCallback = async (req: Request & { user?: any }, res: Res
                 email: user.email,
                 role: user.role,
                 avatar: user.avatar,
+                referralCode: user.referralCode,
                 subscriptionStatus: user.subscriptionStatus,
                 subscriptionPlan: user.subscriptionPlan,
                 hasPassword: !!user.password,

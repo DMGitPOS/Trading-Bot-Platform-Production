@@ -51,16 +51,21 @@ export class BinanceService implements ExchangeService {
         interval: string,
         limit: number = 100
     ): Promise<Candle[]> {
-        const binanceInterval = this.mapInterval(interval);
-        const klines: any[] = await this.client.uiklines(symbol, binanceInterval, { limit });
-        return klines.map((kline: any[]): Candle => ({
-            time: kline[0],
-            open: parseFloat(kline[1]),
-            high: parseFloat(kline[2]),
-            low: parseFloat(kline[3]),
-            close: parseFloat(kline[4]),
-            volume: parseFloat(kline[5]),
-        }));
+        try {
+            const binanceInterval = this.mapInterval(interval);
+            const klines: any[] = await this.client.uiklines(symbol, binanceInterval, { limit });
+            return klines.map((kline: any[]): Candle => ({
+                time: kline[0],
+                open: parseFloat(kline[1]),
+                high: parseFloat(kline[2]),
+                low: parseFloat(kline[3]),
+                close: parseFloat(kline[4]),
+                volume: parseFloat(kline[5]),
+            }));
+        } catch (error) {
+            console.error('Error in fetchKlines:', error);
+            throw error;
+        }
     }
 
     async placeOrder(request: OrderRequest): Promise<OrderResponse> {
@@ -131,7 +136,11 @@ export class BinanceService implements ExchangeService {
 
     async validateCredentials(credentials: ExchangeCredentials): Promise<boolean> {
         try {
+            console.log(credentials)
             const testClient = new Spot(credentials.apiKey, credentials.apiSecret);
+            console.log(testClient)
+            const ss = await testClient.accountInfo();
+            console.log(ss);
             await testClient.accountInformation();
             return true;
         } catch (error) {

@@ -18,14 +18,14 @@ export class CoinbaseService implements ExchangeService {
         this.apiKey = credentials.apiKey;
         this.apiSecret = credentials.apiSecret;
         this.passphrase = credentials.passphrase || '';
-        this.baseUrl = 'https://api.exchange.coinbase.com';
+        this.baseUrl = 'https://api.coinbase.com';
     }
 
     async fetchKlines(symbol: string, interval: string, limit: number = 100): Promise<Candle[]> {
         try {
             const coinbaseInterval = this.mapInterval(interval);
             const response = await fetch(
-                `${this.baseUrl}/products/${symbol}/candles?granularity=${coinbaseInterval}&limit=${limit}`,
+                `${this.baseUrl}/api/v3/brokerage/products/${symbol}/candles?granularity=${coinbaseInterval}&limit=${limit}`,
                 {
                     method: 'GET',
                     headers: {
