@@ -23,7 +23,7 @@ export const createCheckoutSession = async (req: Request, res: Response) => {
         if (!userId) return res.status(401).json({ error: 'Not authorized' });
 
         const user = await User.findById(userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
         let stripeCustomerId = user.stripeCustomerId;
         if (!stripeCustomerId) {
@@ -62,7 +62,7 @@ export const createCheckoutSession = async (req: Request, res: Response) => {
 export const handleWebhook = async (req: Request, res: Response) => {
     try {
         const sig = req.headers['stripe-signature'] as string | undefined;
-        if (!sig) return res.status(400).json({ message: 'No Stripe signature found' });
+        if (!sig) return res.status(400).json({ error: 'No Stripe signature found' });
 
         const event = stripe.webhooks.constructEvent(
             req.body,

@@ -477,6 +477,39 @@ function calculateSMA(data: number[], period: number): number | null {
     return slice.reduce((sum, value) => sum + value, 0) / period;
 }
 
+// --- ATR Calculation ---
+/**
+ * Calculate ATR (Average True Range)
+ * @param candles Array of Candle objects
+ * @param period ATR period (default: 14)
+ * @returns Array of ATR values
+ */
+export function calculateATR(candles: Candle[], period: number = 14): number[] {
+    if (candles.length < period + 1) return [];
+    const atr: number[] = [];
+    for (let i = 1; i < candles.length; i++) {
+        const prev = candles[i - 1];
+        const curr = candles[i];
+        const tr = Math.max(
+            curr.high - curr.low,
+            Math.abs(curr.high - prev.close),
+            Math.abs(curr.low - prev.close)
+        );
+        atr.push(tr);
+    }
+    // First ATR is SMA of first 'period' TRs
+    const atrVals: number[] = [];
+    let sum = 0;
+    for (let i = 0; i < atr.length; i++) {
+        sum += atr[i];
+        if (i >= period - 1) {
+            if (i >= period) sum -= atr[i - period];
+            atrVals.push(sum / period);
+        }
+    }
+    return atrVals;
+}
+
 // --- Strategy Registry ---
 export const strategyRegistry: Record<string, Function> = {
     'moving_average': generateMovingAverageSignal,
@@ -578,6 +611,17 @@ export function interpretConfigStrategy(
             indicatorValues[`BB_upper_${ind.id}`] = bb.upper.length > 0 ? bb.upper[bb.upper.length - 1] : null;
             indicatorValues[`BB_middle_${ind.id}`] = bb.middle.length > 0 ? bb.middle[bb.middle.length - 1] : null;
             indicatorValues[`BB_lower_${ind.id}`] = bb.lower.length > 0 ? bb.lower[bb.lower.length - 1] : null;
+        } else if (ind.type === 'VOLUME') {
+            // Latest candle's volume
+            indicatorValues[`VOLUME_${ind.id}`] = candles.length > 0 ? candles[candles.length - 1].volume : null;
+            // Optionally, average volume over lookback
+            if (ind.params && ind.params.lookback) {
+                const vols = candles.slice(-ind.params.lookback).map(c => c.volume);
+                indicatorValues[`VOLUME_AVG_${ind.id}`] = vols.length > 0 ? vols.reduce((a, b) => a + b, 0) / vols.length : null;
+            }
+        } else if (ind.type === 'ATR') {
+            const atrArr = calculateATR(candles, ind.params.period);
+            indicatorValues[`ATR_${ind.id}`] = atrArr.length > 0 ? atrArr[atrArr.length - 1] : null;
         }
     }
     // 2. Evaluate rules (simple parser: replace indicator names with values, eval condition)

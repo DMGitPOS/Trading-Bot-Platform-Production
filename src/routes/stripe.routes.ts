@@ -14,7 +14,7 @@ router.post('/create-checkout-session', authenticateJWT, (req, res, next) => {
     createCheckoutSession(req, res).catch(next);
 });
 
-router.post('/webhook', handleWebhook);
+router.post('/webhook', express.raw({ type: 'application/json' }), handleWebhook);
 
 router.post('/create-portal-session', authenticateJWT, (req, res, next) => {
     createPortalSession(req, res).catch(next);

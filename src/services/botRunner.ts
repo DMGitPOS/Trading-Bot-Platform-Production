@@ -294,39 +294,66 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
                 });
             }
         } else {
-            // --- SPOT ORDER EXECUTION (existing logic) ---
-            if (finalSignal === 'buy' && state.position === 0) {
-                if (bot.paperTrading) {
-                    await executePaperBuyOrder(bot, symbol, quantity, currentPrice, state);
-                } else {
-                    await executeBuyOrder(bot, exchangeService, symbol, quantity, currentPrice);
+            // --- SPOT ORDER EXECUTION (true reversal logic) ---
+            if (finalSignal === 'buy') {
+                if (state.position > 0) {
+                    // Already long, do nothing
+                } else if (state.position === 0) {
+                    // Flat, just buy
+                    if (bot.paperTrading) {
+                        await executePaperBuyOrder(bot, symbol, quantity, currentPrice, state);
+                    } else {
+                        await executeBuyOrder(bot, exchangeService, symbol, quantity, currentPrice);
+                    }
+                    state.lastSignal = 'buy';
+                    state.position = quantity;
+                    state.lastTradePrice = currentPrice;
+                    await notifyUser({
+                        userId: bot.user.toString(),
+                        type: 'alert',
+                        message: `Bot ${bot.name}: BUY ${quantity} ${symbol} at ${currentPrice}`,
+                        botName: bot.name,
+                    });
+                } else if (state.position > 0) {
+                    // Already long, do nothing
+                } else if (state.position < 0) {
+                    // If you support shorting spot, close short, then buy (not typical)
                 }
-                state.lastSignal = 'buy';
-                state.position = quantity;
-                state.lastTradePrice = currentPrice;
-                // Notify user of buy trade
-                await notifyUser({
-                    userId: bot.user.toString(),
-                    type: 'alert',
-                    message: `Bot ${bot.name}: BUY ${quantity} ${symbol} at ${currentPrice}`,
-                    botName: bot.name,
-                });
-            } else if (finalSignal === 'sell' && state.position > 0) {
-                if (bot.paperTrading) {
-                    await executePaperSellOrder(bot, symbol, state.position, currentPrice, state);
-                } else {
-                    await executeSellOrder(bot, exchangeService, symbol, state.position, currentPrice);
+            } else if (finalSignal === 'sell') {
+                if (state.position > 0) {
+                    // Currently long, sell, then immediately buy if reversal
+                    if (bot.paperTrading) {
+                        await executePaperSellOrder(bot, symbol, state.position, currentPrice, state);
+                    } else {
+                        await executeSellOrder(bot, exchangeService, symbol, state.position, currentPrice);
+                    }
+                    state.lastSignal = 'sell';
+                    state.position = 0;
+                    state.lastTradePrice = currentPrice;
+                    await notifyUser({
+                        userId: bot.user.toString(),
+                        type: 'alert',
+                        message: `Bot ${bot.name}: SELL ${state.position} ${symbol} at ${currentPrice}`,
+                        botName: bot.name,
+                    });
+                    // Immediately buy again for reversal
+                    if (bot.paperTrading) {
+                        await executePaperBuyOrder(bot, symbol, quantity, currentPrice, state);
+                    } else {
+                        await executeBuyOrder(bot, exchangeService, symbol, quantity, currentPrice);
+                    }
+                    state.lastSignal = 'buy';
+                    state.position = quantity;
+                    state.lastTradePrice = currentPrice;
+                    await notifyUser({
+                        userId: bot.user.toString(),
+                        type: 'alert',
+                        message: `Bot ${bot.name}: BUY ${quantity} ${symbol} at ${currentPrice} (Reversal)`,
+                        botName: bot.name,
+                    });
+                } else if (state.position === 0) {
+                    // Flat, do nothing (or sell if you support shorting spot)
                 }
-                state.lastSignal = 'sell';
-                state.position = 0;
-                state.lastTradePrice = currentPrice;
-                // Notify user of sell trade
-                await notifyUser({
-                    userId: bot.user.toString(),
-                    type: 'alert',
-                    message: `Bot ${bot.name}: SELL ${state.position} ${symbol} at ${currentPrice}`,
-                    botName: bot.name,
-                });
             }
         }
         // Update bot performance
