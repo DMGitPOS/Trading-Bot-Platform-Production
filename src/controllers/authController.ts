@@ -166,19 +166,29 @@ export const login = async (req: Request, res: Response) => {
           { expiresIn: '7d' }
         );
 
+        // Populate referrals with basic info
+        const populatedUser = await user.populate({
+            path: 'referrals',
+            select: 'name email _id',
+        });
+
         res.status(201).json({
             token,
             user: {
                 id: user._id,
                 name: user.name,
                 email: user.email,
-                avatar: user.avatar,
                 role: user.role,
+                avatar: user.avatar,
                 subscriptionStatus: user.subscriptionStatus,
                 subscriptionPlan: user.subscriptionPlan,
                 hasPassword: !!user.password,
                 twoFAEnabled: user.twoFAEnabled,
-                referralCode: user.referralCode
+                referralCode: user.referralCode,
+                referredBy: user.referredBy,
+                referrals: populatedUser.referrals,
+                referralRewards: user.referralRewards,
+                manualSubscription: user.manualSubscription
             },
         });
     } catch (err) {
@@ -378,6 +388,12 @@ export const socialAuthCallback = async (req: Request & { user?: any }, res: Res
             { expiresIn: '7d' }
         );
 
+        // Populate referrals with basic info
+        const populatedUser = await user.populate({
+            path: 'referrals',
+            select: 'name email _id',
+        });
+
         const responseData = {
             message: "Login successful",
             user: {
@@ -386,11 +402,15 @@ export const socialAuthCallback = async (req: Request & { user?: any }, res: Res
                 email: user.email,
                 role: user.role,
                 avatar: user.avatar,
-                referralCode: user.referralCode,
                 subscriptionStatus: user.subscriptionStatus,
                 subscriptionPlan: user.subscriptionPlan,
                 hasPassword: !!user.password,
-                twoFAEnabled: user.twoFAEnabled
+                twoFAEnabled: user.twoFAEnabled,
+                referralCode: user.referralCode,
+                referredBy: user.referredBy,
+                referrals: populatedUser.referrals,
+                referralRewards: user.referralRewards,
+                manualSubscription: user.manualSubscription
             },
             token,
         };
@@ -430,6 +450,7 @@ export const getMe = async (req: Request, res: Response) => {
             referredBy: user.referredBy,
             referrals: populatedUser.referrals,
             referralRewards: user.referralRewards,
+            manualSubscription: user.manualSubscription
         });
     } catch (err) {
         res.status(500).json({ error: 'Get your infomation failed' });

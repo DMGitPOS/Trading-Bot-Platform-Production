@@ -567,22 +567,7 @@ export const getBotPerformance = async (req: Request, res: Response) => {
 
 export const backtestBot = async (req: Request, res: Response) => {
     try {
-        const { strategy = 'moving_average', config } = req.body;
-        // Support config-based strategies
-        if (strategy === 'config' && config) {
-            // Validate config (optional: add schema validation)
-            const {
-                candles,
-                quantity,
-                initialBalance,
-            } = req.body;
-            // Use runConfigStrategyBacktest for config-based strategies
-            const result = runConfigStrategyBacktest(candles, config, {
-                quantity: quantity || 1,
-                initialBalance: initialBalance || 1000,
-            });
-            return res.status(201).json(result);
-        }
+        const { strategy = 'moving_average' } = req.body;
         let validationSchema;
         if (strategy === 'moving_average') {
             validationSchema = movingAverageBacktestSchema;
@@ -658,6 +643,9 @@ export const backtestBot = async (req: Request, res: Response) => {
             result = runConfigStrategyBacktest(candles, strategyResult.config, {
                 quantity,
                 initialBalance,
+                marketType,
+                leverage,
+                positionSide,
             });
         }
         // Return the params for confirmation (for now)

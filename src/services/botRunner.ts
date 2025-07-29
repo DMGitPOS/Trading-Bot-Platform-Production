@@ -129,14 +129,18 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
         let strategyName: string = (typeof bot.strategy?.name === 'string' && bot.strategy?.name) ? bot.strategy.name : 'moving_average';
         let strategyParams = bot.strategy?.parameters || { shortPeriod, longPeriod };
         let signal: 'buy' | 'sell' | null = null;
-        if (bot.strategy?.type === 'config') {
+        if (bot.strategy?.type !== 'moving_average' && bot.strategy?.type !== 'rsi') {
             // Interpret config-based strategy (visual builder)
             try {
-                const config = bot.strategy?.config && typeof bot.strategy.config === 'object'
+                const strategyResult: any = await Strategy.findById(bot.strategy?.type);
+                if (!strategyResult) {
+                    throw new Error(`Strategy not found`);
+                }
+                const config = strategyResult.config && typeof strategyResult.config === 'object'
                     ? {
-                        indicators: Array.isArray((bot.strategy.config as any).indicators) ? (bot.strategy.config as any).indicators : [],
-                        rules: Array.isArray((bot.strategy.config as any).rules) ? (bot.strategy.config as any).rules : [],
-                        risk: typeof (bot.strategy.config as any).risk === 'object' ? (bot.strategy.config as any).risk : {},
+                        indicators: Array.isArray((strategyResult.config as any).indicators) ? (strategyResult.config as any).indicators : [],
+                        rules: Array.isArray((strategyResult.config as any).rules) ? (strategyResult.config as any).rules : [],
+                        risk: typeof (strategyResult.config as any).risk === 'object' ? (strategyResult.config as any).risk : {},
                     }
                     : { indicators: [], rules: [], risk: {} };
                 signal = interpretConfigStrategy(candles, state, config);

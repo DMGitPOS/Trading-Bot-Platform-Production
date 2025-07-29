@@ -26,6 +26,7 @@ export interface IUser extends Document {
     referredBy: mongoose.Types.ObjectId | null;
     referrals: mongoose.Types.ObjectId[];
     referralRewards: number;
+    manualSubscription: boolean;
     comparePassword: (password: string) => Promise<boolean>;
     generateEmailVerificationToken: (email: string) => string;
     createVerificationUrl: (token: string) => string;
@@ -100,6 +101,10 @@ const UserSchema: Schema = new Schema<IUser>({
     referralRewards: {
         type: Number,
         default: 0,
+    },
+    manualSubscription: {
+        type: Boolean,
+        default: false,
     },
 }, {
     timestamps: true,

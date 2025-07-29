@@ -120,6 +120,7 @@ export const executePayment = async (req: Request, res: Response) => {
                 await User.findByIdAndUpdate(userId, {
                     subscriptionStatus: "active",
                     subscriptionPlan: plan.charAt(0).toUpperCase() + plan.slice(1),
+                    manualSubscription: false,
                 });
                 res.status(201).json({ success: true });
             }

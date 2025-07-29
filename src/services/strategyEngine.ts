@@ -880,9 +880,9 @@ export function interpretConfigStrategy(
 export function runConfigStrategyBacktest(
     candles: Candle[],
     config: { indicators: any[]; rules: any[]; risk: any },
-    params: { quantity: number; initialBalance: number }
+    params: { quantity: number; initialBalance: number; marketType?: string; leverage?: number; positionSide?: string }
 ): BacktestResult {
-    const { quantity, initialBalance } = params;
+    const { quantity, initialBalance, marketType = 'spot', leverage = 1, positionSide = 'both' } = params;
     let balance = initialBalance;
     let position = 0;
     let entryPrice = 0;
@@ -891,12 +891,17 @@ export function runConfigStrategyBacktest(
     const roundTo8 = (num: number): number => Math.round(num * 100000000) / 100000000;
     const tpPct = config.risk?.takeProfit ? config.risk.takeProfit / 100 : 0.005; // default 0.5%
     const slPct = config.risk?.stopLoss ? config.risk.stopLoss / 100 : 0.003; // default 0.3%
+
     for (let i = 0; i < candles.length; i++) {
         const slicedCandles = candles.slice(0, i + 1);
-        // Use enhanced interpretConfigStrategy for this candle
         const state = { lastSignal, position, entryPrice };
-        const signal = interpretConfigStrategy(slicedCandles, state, config);
+        let signal = interpretConfigStrategy(slicedCandles, state, config);
         const price = candles[i].close;
+
+        // Position side filtering
+        if (positionSide === 'long' && signal === 'sell') signal = null;
+        if (positionSide === 'short' && signal === 'buy') signal = null;
+
         // --- TP/SL logic ---
         if (position !== 0 && entryPrice > 0) {
             const tp = position > 0 ? entryPrice * (1 + tpPct) : entryPrice * (1 - tpPct);
@@ -904,7 +909,12 @@ export function runConfigStrategyBacktest(
             if ((position > 0 && (price >= tp || price <= sl)) ||
                 (position < 0 && (price <= tp || price >= sl))) {
                 // Close position for TP/SL
-                balance = roundTo8(balance + (position > 0 ? price * Math.abs(position) : -price * Math.abs(position)));
+                if (marketType === 'futures') {
+                    const pnl = (position > 0 ? price - entryPrice : entryPrice - price) * Math.abs(position) * leverage;
+                    balance = roundTo8(balance + pnl);
+                } else {
+                    balance = roundTo8(balance + (position > 0 ? price * Math.abs(position) : -price * Math.abs(position)));
+                }
                 trades.push({ time: candles[i].time, price, side: position > 0 ? 'sell' : 'buy', quantity: Math.abs(position), balance });
                 position = 0;
                 entryPrice = 0;
@@ -912,40 +922,63 @@ export function runConfigStrategyBacktest(
                 continue;
             }
         }
+
         // --- Signal logic ---
-        if (signal === 'buy' && position <= 0) {
-            // If short, close and reverse
-            if (position < 0) {
-                balance = roundTo8(balance - price * Math.abs(position));
-                trades.push({ time: candles[i].time, price, side: 'buy', quantity: Math.abs(position), balance });
+        if (marketType === 'futures') {
+            if (signal === 'buy' && position <= 0) {
+                // Close short if needed
+                if (position < 0) {
+                    const pnl = (entryPrice - price) * Math.abs(position) * leverage;
+                    balance = roundTo8(balance + pnl);
+                    trades.push({ time: candles[i].time, price, side: 'buy', quantity: Math.abs(position), balance });
+                }
+                // Open long
+                position = quantity;
+                entryPrice = price;
+                trades.push({ time: candles[i].time, price, side: 'buy', quantity, balance });
+                lastSignal = 'buy';
+            } else if (signal === 'sell' && position >= 0) {
+                // Close long if needed
+                if (position > 0) {
+                    const pnl = (price - entryPrice) * position * leverage;
+                    balance = roundTo8(balance + pnl);
+                    trades.push({ time: candles[i].time, price, side: 'sell', quantity: position, balance });
+                }
+                // Open short
+                position = -quantity;
+                entryPrice = price;
+                trades.push({ time: candles[i].time, price, side: 'sell', quantity, balance });
+                lastSignal = 'sell';
             }
-            // Open long
-            balance = roundTo8(balance - price * quantity);
-            position = quantity;
-            entryPrice = price;
-            trades.push({ time: candles[i].time, price, side: 'buy', quantity, balance });
-            lastSignal = 'buy';
-        } else if (signal === 'sell' && position >= 0) {
-            // If long, close and reverse
-            if (position > 0) {
-                balance = roundTo8(balance + price * Math.abs(position));
-                trades.push({ time: candles[i].time, price, side: 'sell', quantity: Math.abs(position), balance });
+        } else {
+            // Spot logic
+            if (signal === 'buy' && lastSignal !== 'buy' && position === 0 && balance >= price * quantity) {
+                balance = roundTo8(balance - price * quantity);
+                position += quantity;
+                trades.push({ time: candles[i].time, price, side: 'buy', quantity, balance });
+                lastSignal = 'buy';
+            } else if (signal === 'sell' && lastSignal !== 'sell' && position > 0) {
+                balance = roundTo8(balance + price * quantity);
+                position -= quantity;
+                trades.push({ time: candles[i].time, price, side: 'sell', quantity, balance });
+                lastSignal = 'sell';
             }
-            // Open short
-            balance = roundTo8(balance + price * quantity);
-            position = -quantity;
-            entryPrice = price;
-            trades.push({ time: candles[i].time, price, side: 'sell', quantity, balance });
-            lastSignal = 'sell';
         }
     }
+
     // Close any open position at the end
     if (position !== 0) {
         const price = candles[candles.length - 1].close;
-        balance = roundTo8(balance + (position > 0 ? price * Math.abs(position) : -price * Math.abs(position)));
+        if (marketType === 'futures') {
+            const pnl = (position > 0 ? price - entryPrice : entryPrice - price) * Math.abs(position) * leverage;
+            balance = roundTo8(balance + pnl);
+        } else {
+            balance = roundTo8(balance + (position > 0 ? price * Math.abs(position) : -price * Math.abs(position)));
+        }
         trades.push({ time: candles[candles.length - 1].time, price, side: position > 0 ? 'sell' : 'buy', quantity: Math.abs(position), balance });
         position = 0;
     }
+
     // Calculate PnL and win rate
     let pnl = roundTo8(balance - initialBalance);
     let wins = 0, total = 0;
