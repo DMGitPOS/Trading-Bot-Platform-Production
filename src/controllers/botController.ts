@@ -92,6 +92,44 @@ const movingAverageBacktestSchema = Joi.object({
     marketType: Joi.string().valid('spot', 'futures').default('spot'),
     leverage: Joi.number().min(1).max(125).default(1),
     positionSide: Joi.string().valid('both', 'long', 'short').default('both'),
+    // Enhanced features
+    volatilityConfig: Joi.object({
+        enabled: Joi.boolean().default(false),
+        atrPeriod: Joi.number().integer().min(5).max(50).default(14),
+        lowVolatilityThreshold: Joi.number().min(0.1).default(0.5),
+        highVolatilityThreshold: Joi.number().min(0.5).default(2.0),
+        lowVolStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(5),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+        highVolStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(5),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+        normalStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(10),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+    }).optional(),
+    drawdownConfig: Joi.object({
+        enabled: Joi.boolean().default(false),
+        maxDrawdown: Joi.number().min(1).max(50).default(10),
+        trailingStop: Joi.boolean().default(false),
+        trailingStopDistance: Joi.number().min(1).max(20).default(5),
+    }).optional(),
+    confirmationSignals: Joi.object({
+        useRSI: Joi.boolean().default(false),
+        rsiPeriod: Joi.number().integer().min(5).max(30).default(14),
+        rsiOverbought: Joi.number().min(60).max(90).default(70),
+        rsiOversold: Joi.number().min(10).max(40).default(30),
+        useVolume: Joi.boolean().default(false),
+        volumeThreshold: Joi.number().min(0.5).default(1.2),
+        useTrendStrength: Joi.boolean().default(false),
+        minTrendStrength: Joi.number().min(0.1).default(0.5),
+    }).optional(),
 });
 
 const rsiBacktestSchema = Joi.object({
@@ -108,6 +146,44 @@ const rsiBacktestSchema = Joi.object({
     marketType: Joi.string().valid('spot', 'futures').default('spot'),
     leverage: Joi.number().min(1).max(125).default(1),
     positionSide: Joi.string().valid('both', 'long', 'short').default('both'),
+    // Enhanced features
+    volatilityConfig: Joi.object({
+        enabled: Joi.boolean().default(false),
+        atrPeriod: Joi.number().integer().min(5).max(50).default(14),
+        lowVolatilityThreshold: Joi.number().min(0.1).default(0.5),
+        highVolatilityThreshold: Joi.number().min(0.5).default(2.0),
+        lowVolStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(5),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+        highVolStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(5),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+        normalStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(10),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+    }).optional(),
+    drawdownConfig: Joi.object({
+        enabled: Joi.boolean().default(false),
+        maxDrawdown: Joi.number().min(1).max(50).default(10),
+        trailingStop: Joi.boolean().default(false),
+        trailingStopDistance: Joi.number().min(1).max(20).default(5),
+    }).optional(),
+    confirmationSignals: Joi.object({
+        useRSI: Joi.boolean().default(false),
+        rsiPeriod: Joi.number().integer().min(5).max(30).default(14),
+        rsiOverbought: Joi.number().min(60).max(90).default(70),
+        rsiOversold: Joi.number().min(10).max(40).default(30),
+        useVolume: Joi.boolean().default(false),
+        volumeThreshold: Joi.number().min(0.5).default(1.2),
+        useTrendStrength: Joi.boolean().default(false),
+        minTrendStrength: Joi.number().min(0.1).default(0.5),
+    }).optional(),
 });
 
 const customBacktestSchema = Joi.object({
@@ -121,6 +197,44 @@ const customBacktestSchema = Joi.object({
     marketType: Joi.string().valid('spot', 'futures').default('spot'),
     leverage: Joi.number().min(1).max(125).default(1),
     positionSide: Joi.string().valid('both', 'long', 'short').default('both'),
+    // Enhanced features
+    volatilityConfig: Joi.object({
+        enabled: Joi.boolean().default(false),
+        atrPeriod: Joi.number().integer().min(5).max(50).default(14),
+        lowVolatilityThreshold: Joi.number().min(0.1).default(0.5),
+        highVolatilityThreshold: Joi.number().min(0.5).default(2.0),
+        lowVolStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(5),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+        highVolStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(5),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+        normalStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(10),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+    }).optional(),
+    drawdownConfig: Joi.object({
+        enabled: Joi.boolean().default(false),
+        maxDrawdown: Joi.number().min(1).max(50).default(10),
+        trailingStop: Joi.boolean().default(false),
+        trailingStopDistance: Joi.number().min(1).max(20).default(5),
+    }).optional(),
+    confirmationSignals: Joi.object({
+        useRSI: Joi.boolean().default(false),
+        rsiPeriod: Joi.number().integer().min(5).max(30).default(14),
+        rsiOverbought: Joi.number().min(60).max(90).default(70),
+        rsiOversold: Joi.number().min(10).max(40).default(30),
+        useVolume: Joi.boolean().default(false),
+        volumeThreshold: Joi.number().min(0.5).default(1.2),
+        useTrendStrength: Joi.boolean().default(false),
+        minTrendStrength: Joi.number().min(0.1).default(0.5),
+    }).optional(),
 });
 
 // Joi schema for backtestBotStrategy
@@ -595,6 +709,10 @@ export const backtestBot = async (req: Request, res: Response) => {
             marketType = 'spot',
             leverage = 1,
             positionSide = 'both',
+            // Enhanced features
+            volatilityConfig,
+            drawdownConfig,
+            confirmationSignals,
         } = req.body;
 
         // Create exchange service for backtesting (using public endpoints)
@@ -608,7 +726,7 @@ export const backtestBot = async (req: Request, res: Response) => {
 
         let result;
         if (strategy === 'moving_average') {
-            // Run moving average backtest
+            // Run moving average backtest with enhanced features
             const maParams = {
                 symbol,
                 shortPeriod,
@@ -618,10 +736,14 @@ export const backtestBot = async (req: Request, res: Response) => {
                 marketType,
                 leverage,
                 positionSide,
+                // Enhanced features
+                volatilityConfig,
+                drawdownConfig,
+                confirmationSignals,
             };
             result = runMovingAverageBacktest(candles, maParams);
         } else if (strategy === 'rsi') {
-            // Run RSI backtest
+            // Run RSI backtest with enhanced features
             const rsiParams = {
                 symbol,
                 period,
@@ -632,6 +754,10 @@ export const backtestBot = async (req: Request, res: Response) => {
                 marketType,
                 leverage,
                 positionSide,
+                // Enhanced features
+                volatilityConfig,
+                drawdownConfig,
+                confirmationSignals,
             };
             result = runRSIBacktest(candles, rsiParams);
         } else {
@@ -639,17 +765,30 @@ export const backtestBot = async (req: Request, res: Response) => {
             if (!strategyResult) {
                 return res.status(404).json({ message: 'Strategy not found' });
             }
-            // Use runConfigStrategyBacktest for config-based strategies
+            // Use runConfigStrategyBacktest for config-based strategies with enhanced features
             result = runConfigStrategyBacktest(candles, strategyResult.config, {
                 quantity,
                 initialBalance,
                 marketType,
                 leverage,
                 positionSide,
+                // Enhanced features
+                volatilityConfig,
+                drawdownConfig,
+                confirmationSignals,
             });
         }
         // Return the params for confirmation (for now)
-        res.status(201).json({ ...result, marketType, leverage, positionSide });
+        res.status(201).json({ 
+            ...result, 
+            marketType, 
+            leverage, 
+            positionSide,
+            // Include enhanced features in response
+            volatilityConfig,
+            drawdownConfig,
+            confirmationSignals,
+        });
     } catch (error) {
         res.status(500).json({ error: 'Backtest failed' });
     }

@@ -2,11 +2,11 @@ import { IBot } from '../models/Bot';
 import { IApiKey } from '../models/ApiKey';
 import { ExchangeFactory } from './exchange/ExchangeFactory';
 import { decrypt } from '../utils/crypto';
-import { Candle } from './strategyEngine';
+import { Candle, detectVolatilityRegime, getVolatilityAdjustedParams, updateDrawdownState, DrawdownState } from './strategyEngine';
 import Trade from '../models/Trade';
 import PaperTrade from '../models/PaperTrade';
 import mongoose from 'mongoose';
-import { strategyRegistry, interpretConfigStrategy } from './strategyEngine';
+import { strategyRegistry, interpretConfigStrategy, generateEnhancedMovingAverageSignal } from './strategyEngine';
 import { notifyUser } from './notification/notifyUser';
 import ManualTradeSignal from '../models/ManualTradeSignal';
 import Strategy from '../models/Strategy';
@@ -21,6 +21,10 @@ interface StrategyState {
     lastFundingTime?: number; // Track last funding time for funding payments
     entryPrice?: number; // Track entry price for PnL calculation
     isLongPosition?: boolean; // Track if current position is long or short
+    // Enhanced features
+    drawdownState?: DrawdownState;
+    volatilityRegime?: 'low' | 'normal' | 'high';
+    lastVolatilityCheck?: number;
 }
 
 // In-memory state tracking for each bot (in production, persist in DB or use a distributed queue)
@@ -63,6 +67,15 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
             paperBalance: bot.paperBalance,
             dailyPnL: 0,
             lastTradeDate: null,
+            // Initialize enhanced features
+            drawdownState: {
+                peakBalance: bot.paperBalance,
+                currentDrawdown: 0,
+                maxDrawdownReached: 0,
+                lastPeakTime: Date.now()
+            },
+            volatilityRegime: 'normal',
+            lastVolatilityCheck: 0
         };
     }
 
@@ -75,6 +88,21 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
             apiSecret: decrypt(apiKey.apiSecret),
         };
         const exchangeService = ExchangeFactory.createExchange(bot.exchange, credentials);
+
+        // --- ENHANCED FEATURES: DRAWDOWN CHECK ---
+        if (bot.drawdownConfig?.enabled) {
+            const drawdownCheck = updateDrawdownState(state.drawdownState!, state.paperBalance, bot.drawdownConfig);
+            if (drawdownCheck.shouldStop) {
+                console.log(`Bot ${bot.name}: Stopping due to drawdown - ${drawdownCheck.reason}`);
+                await notifyUser({
+                    userId: bot.user.toString(),
+                    type: 'alert',
+                    message: `Bot ${bot.name}: STOPPED due to drawdown - ${drawdownCheck.reason}`,
+                    botName: bot.name,
+                });
+                return; // Stop trading
+            }
+        }
 
         // --- FUTURES SUPPORT ---
         const isFutures = bot.marketType === 'futures';
@@ -125,11 +153,36 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
         const candles = await exchangeService.fetchKlines(symbol, interval, Math.max(shortPeriod, longPeriod) + 10);
         const currentPrice = candles[candles.length - 1]?.close;
 
-        // --- DYNAMIC STRATEGY SELECTION ---
+        // --- ENHANCED FEATURES: VOLATILITY DETECTION ---
+        let adjustedStrategyParams = { shortPeriod, longPeriod, quantity };
+        if (bot.volatilityConfig?.enabled && Date.now() - (state.lastVolatilityCheck || 0) > 5 * 60 * 1000) { // Check every 5 minutes
+            const volatilityRegime = detectVolatilityRegime(candles, bot.volatilityConfig);
+            state.volatilityRegime = volatilityRegime;
+            state.lastVolatilityCheck = Date.now();
+            
+            adjustedStrategyParams = getVolatilityAdjustedParams(
+                { shortPeriod, longPeriod, quantity },
+                volatilityRegime,
+                bot.volatilityConfig
+            );
+            
+            console.log(`Bot ${bot.name}: Volatility regime detected: ${volatilityRegime}, adjusted params:`, adjustedStrategyParams);
+        }
+
+        // --- ENHANCED STRATEGY EXECUTION ---
         let strategyName: string = (typeof bot.strategy?.name === 'string' && bot.strategy?.name) ? bot.strategy.name : 'moving_average';
-        let strategyParams = bot.strategy?.parameters || { shortPeriod, longPeriod };
         let signal: 'buy' | 'sell' | null = null;
-        if (bot.strategy?.type !== 'moving_average' && bot.strategy?.type !== 'rsi') {
+        
+        if (bot.strategy?.type === 'moving_average') {
+            // Use enhanced moving average with confirmation signals
+            signal = generateEnhancedMovingAverageSignal(candles, state, {
+                shortPeriod: adjustedStrategyParams.shortPeriod,
+                longPeriod: adjustedStrategyParams.longPeriod,
+                positionSide: bot.positionSide,
+                marketType: bot.marketType,
+                confirmationSignals: bot.confirmationSignals
+            });
+        } else if (bot.strategy?.type !== 'rsi') {
             // Interpret config-based strategy (visual builder)
             try {
                 const strategyResult: any = await Strategy.findById(bot.strategy?.type);
@@ -259,7 +312,7 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
             }
             // Pass additional parameters for position side and market type
             const enhancedParams = {
-                ...strategyParams,
+                ...adjustedStrategyParams,
                 positionSide: bot.positionSide,
                 marketType: bot.marketType,
             };
@@ -270,8 +323,11 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
         // Position side filtering is now handled within the strategy functions
         let finalSignal = signal;
 
+        // Use adjusted parameters for quantity
+        const finalQuantity = adjustedStrategyParams.quantity;
+        
         // Check risk limits before executing trades
-        if (!await checkRiskLimits(bot, state, finalSignal, currentPrice, quantity)) {
+        if (!await checkRiskLimits(bot, state, finalSignal, currentPrice, finalQuantity)) {
             console.log(`Bot ${bot.name}: Risk limits exceeded, skipping trade`);
             return;
         }
@@ -285,7 +341,7 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
                     signal: finalSignal,
                     symbol,
                     price: currentPrice,
-                    quantity,
+                    quantity: finalQuantity,
                     marketType: bot.marketType,
                     leverage: bot.leverage,
                     positionSide: bot.positionSide,
@@ -295,12 +351,12 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
                 await notifyUser({
                     userId: bot.user.toString(),
                     type: 'manual_trade',
-                    message: `Manual trade signal for ${bot.name}: ${finalSignal.toUpperCase()} ${quantity} ${symbol} at ${currentPrice}`,
+                    message: `Manual trade signal for ${bot.name}: ${finalSignal.toUpperCase()} ${finalQuantity} ${symbol} at ${currentPrice}`,
                     botName: bot.name,
                     data: {
                         signal: finalSignal,
                         symbol,
-                        quantity,
+                        quantity: finalQuantity,
                         price: currentPrice,
                         marketType: bot.marketType,
                         leverage: bot.leverage,
@@ -322,16 +378,16 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
                     symbol,
                     side: 'buy',
                     type: 'market',
-                    quantity,
+                    quantity: finalQuantity,
                 });
                 state.lastSignal = 'buy';
-                state.position = quantity;
+                state.position = finalQuantity;
                 state.lastTradePrice = currentPrice;
                 // Notify user of buy trade
                 await notifyUser({
                     userId: bot.user.toString(),
                     type: 'alert',
-                    message: `Bot ${bot.name}: BUY ${quantity} ${symbol} at ${currentPrice}`,
+                    message: `Bot ${bot.name}: BUY ${finalQuantity} ${symbol} at ${currentPrice}`,
                     botName: bot.name,
                 });
             } else if (finalSignal === 'sell' && currentPosition > 0) {
@@ -341,16 +397,16 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
                     symbol,
                     side: 'sell',
                     type: 'market',
-                    quantity,
+                    quantity: finalQuantity,
                 });
                 state.lastSignal = 'sell';
-                state.position = -quantity;
+                state.position = -finalQuantity;
                 state.lastTradePrice = currentPrice;
                 // Notify user of sell trade
                 await notifyUser({
                     userId: bot.user.toString(),
                     type: 'alert',
-                    message: `Bot ${bot.name}: SELL ${quantity} ${symbol} at ${currentPrice}`,
+                    message: `Bot ${bot.name}: SELL ${finalQuantity} ${symbol} at ${currentPrice}`,
                     botName: bot.name,
                 });
             }

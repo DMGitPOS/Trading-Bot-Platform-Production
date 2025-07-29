@@ -28,6 +28,44 @@ export interface IBot extends Document {
     useTestnet?: boolean;
     testnetApiKeyRef?: mongoose.Types.ObjectId;
     mode: 'auto' | 'manual';
+    // Enhanced features
+    volatilityConfig?: {
+        enabled: boolean;
+        atrPeriod: number;
+        lowVolatilityThreshold: number;
+        highVolatilityThreshold: number;
+        lowVolStrategy: {
+            shortPeriod: number;
+            longPeriod: number;
+            quantity: number;
+        };
+        highVolStrategy: {
+            shortPeriod: number;
+            longPeriod: number;
+            quantity: number;
+        };
+        normalStrategy: {
+            shortPeriod: number;
+            longPeriod: number;
+            quantity: number;
+        };
+    };
+    drawdownConfig?: {
+        enabled: boolean;
+        maxDrawdown: number; // percentage
+        trailingStop: boolean;
+        trailingStopDistance: number; // percentage
+    };
+    confirmationSignals?: {
+        useRSI: boolean;
+        rsiPeriod: number;
+        rsiOverbought: number;
+        rsiOversold: number;
+        useVolume: boolean;
+        volumeThreshold: number;
+        useTrendStrength: boolean;
+        minTrendStrength: number;
+    };
     createdAt: Date;
     updatedAt: Date;
 }
@@ -60,6 +98,44 @@ const BotSchema = new Schema<IBot>({
     useTestnet: { type: Boolean, default: false },
     testnetApiKeyRef: { type: Schema.Types.ObjectId, ref: 'ApiKey' },
     mode: { type: String, enum: ['auto', 'manual'], default: 'auto' },
+    // Enhanced features
+    volatilityConfig: {
+        enabled: { type: Boolean, default: false },
+        atrPeriod: { type: Number, default: 14 },
+        lowVolatilityThreshold: { type: Number, default: 0.5 }, // 0.5%
+        highVolatilityThreshold: { type: Number, default: 2.0 }, // 2.0%
+        lowVolStrategy: {
+            shortPeriod: { type: Number, default: 5 },
+            longPeriod: { type: Number, default: 20 },
+            quantity: { type: Number, default: 1 },
+        },
+        highVolStrategy: {
+            shortPeriod: { type: Number, default: 5 },
+            longPeriod: { type: Number, default: 20 },
+            quantity: { type: Number, default: 1 },
+        },
+        normalStrategy: {
+            shortPeriod: { type: Number, default: 5 },
+            longPeriod: { type: Number, default: 20 },
+            quantity: { type: Number, default: 1 },
+        },
+    },
+    drawdownConfig: {
+        enabled: { type: Boolean, default: false },
+        maxDrawdown: { type: Number, default: 10 }, // 10%
+        trailingStop: { type: Boolean, default: false },
+        trailingStopDistance: { type: Number, default: 5 }, // 5%
+    },
+    confirmationSignals: {
+        useRSI: { type: Boolean, default: false },
+        rsiPeriod: { type: Number, default: 14 },
+        rsiOverbought: { type: Number, default: 70 },
+        rsiOversold: { type: Number, default: 30 },
+        useVolume: { type: Boolean, default: false },
+        volumeThreshold: { type: Number, default: 1000 }, // 1000+
+        useTrendStrength: { type: Boolean, default: false },
+        minTrendStrength: { type: Number, default: 0.5 }, // 0.5+
+    },
 }, { timestamps: true });
 
 export default mongoose.model<IBot>('Bot', BotSchema); 

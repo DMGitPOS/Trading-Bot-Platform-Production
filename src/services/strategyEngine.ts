@@ -53,12 +53,35 @@ export function binanceKlinesToCandles(klines: any[]): Candle[] {
 
 // Simple moving average crossover strategy
 export function runMovingAverageBacktest(candles: Candle[], params: any): BacktestResult {
-    const { shortPeriod, longPeriod, quantity, initialBalance, marketType = 'spot', leverage = 1, positionSide = 'both' } = params;
+    const { 
+        shortPeriod, 
+        longPeriod, 
+        quantity, 
+        initialBalance, 
+        marketType = 'spot', 
+        leverage = 1, 
+        positionSide = 'both',
+        // Enhanced features
+        volatilityConfig,
+        drawdownConfig,
+        confirmationSignals,
+    } = params;
+    
     let balance = initialBalance;
     let position = 0;
     let entryPrice = 0; // Track entry price for PnL calculation
     let lastSignal: 'buy' | 'sell' | null = null;
     const trades: TradeLog[] = [];
+
+    // Enhanced features state
+    let drawdownState: DrawdownState = {
+        peakBalance: initialBalance,
+        currentDrawdown: 0,
+        maxDrawdownReached: 0,
+        lastPeakTime: Date.now(),
+    };
+    let volatilityRegime: 'low' | 'normal' | 'high' = 'normal';
+    let lastVolatilityCheck = 0;
 
     // Helper function to round to 8 decimal places (standard for crypto)
     const roundTo8 = (num: number): number => Math.round(num * 100000000) / 100000000;
@@ -73,17 +96,93 @@ export function runMovingAverageBacktest(candles: Candle[], params: any): Backte
     const closes = candles.map(c => c.close);
 
     for (let i = 0; i < candles.length; i++) {
-        const shortMA = sma(closes, shortPeriod, i);
-        const longMA = sma(closes, longPeriod, i);
+        const currentTime = candles[i].time;
+        
+        // Check drawdown protection
+        if (drawdownConfig?.enabled) {
+            const drawdownResult = updateDrawdownState(drawdownState, balance, drawdownConfig);
+            if (drawdownResult.shouldStop) {
+                // Stop trading due to drawdown limit
+                break;
+            }
+            drawdownState = {
+                ...drawdownState,
+                currentDrawdown: calculateDrawdown(balance, drawdownState.peakBalance),
+            };
+        }
+
+        // Check volatility regime every 5 minutes (300000ms)
+        if (volatilityConfig?.enabled && currentTime - lastVolatilityCheck > 300000) {
+            const availableCandles = candles.slice(0, i + 1);
+            if (availableCandles.length >= volatilityConfig.atrPeriod) {
+                volatilityRegime = detectVolatilityRegime(availableCandles, volatilityConfig);
+            }
+            lastVolatilityCheck = currentTime;
+        }
+
+        // Get volatility-adjusted parameters
+        let adjustedShortPeriod = shortPeriod;
+        let adjustedLongPeriod = longPeriod;
+        let adjustedQuantity = quantity;
+        
+        if (volatilityConfig?.enabled) {
+            const adjustedParams = getVolatilityAdjustedParams(
+                { shortPeriod, longPeriod, quantity },
+                volatilityRegime,
+                volatilityConfig
+            );
+            adjustedShortPeriod = adjustedParams.shortPeriod;
+            adjustedLongPeriod = adjustedParams.longPeriod;
+            adjustedQuantity = adjustedParams.quantity;
+        }
+
+        const shortMA = sma(closes, adjustedShortPeriod, i);
+        const longMA = sma(closes, adjustedLongPeriod, i);
         if (shortMA === null || longMA === null) continue;
         const price = candles[i].close;
         
-        // Determine signal based on MA crossover
+        // Determine signal based on MA crossover with enhanced features
         let signal: 'buy' | 'sell' | null = null;
         if (shortMA > longMA) {
             signal = 'buy'; // Bullish signal
         } else if (shortMA < longMA) {
             signal = 'sell'; // Bearish signal
+        }
+
+        // Apply confirmation signals if enabled
+        if (signal && confirmationSignals) {
+            const conf = confirmationSignals;
+            
+            // RSI confirmation
+            if (conf.useRSI) {
+                const rsiValues = calculateRSI(closes, conf.rsiPeriod);
+                if (rsiValues.length > i) {
+                    const currentRSI = rsiValues[i];
+                    if (signal === 'buy' && currentRSI > conf.rsiOverbought) {
+                        signal = null; // Avoid buying in overbought conditions
+                    } else if (signal === 'sell' && currentRSI < conf.rsiOversold) {
+                        signal = null; // Avoid selling in oversold conditions
+                    }
+                }
+            }
+            
+            // Volume confirmation
+            if (signal && conf.useVolume) {
+                const volumes = candles.map(c => c.volume);
+                const avgVolume = volumes.slice(Math.max(0, i - 20), i + 1).reduce((a, b) => a + b, 0) / Math.min(21, i + 1);
+                const currentVolume = candles[i].volume;
+                if (currentVolume < avgVolume * conf.volumeThreshold) {
+                    signal = null; // Insufficient volume
+                }
+            }
+            
+            // Trend strength confirmation
+            if (signal && conf.useTrendStrength) {
+                const trendStrength = Math.abs(shortMA - longMA) / longMA * 100;
+                if (trendStrength < conf.minTrendStrength) {
+                    signal = null; // Trend too weak
+                }
+            }
         }
 
         // Apply position side filtering
@@ -105,11 +204,11 @@ export function runMovingAverageBacktest(candles: Candle[], params: any): Backte
                     trades.push({ time: candles[i].time, price, side: 'buy', quantity: Math.abs(position), balance });
                 }
                 // Open long position - only use margin
-                const margin = roundTo8((price * quantity) / leverage);
+                const margin = roundTo8((price * adjustedQuantity) / leverage);
                 balance = roundTo8(balance - margin);
-                position = quantity;
+                position = adjustedQuantity;
                 entryPrice = price; // Set entry price for long position
-                trades.push({ time: candles[i].time, price, side: 'buy', quantity, balance });
+                trades.push({ time: candles[i].time, price, side: 'buy', quantity: adjustedQuantity, balance });
                 lastSignal = 'buy';
             } else if (signal === 'sell' && position >= 0) {
                 // Open short position or close long position
@@ -120,26 +219,32 @@ export function runMovingAverageBacktest(candles: Candle[], params: any): Backte
                     trades.push({ time: candles[i].time, price, side: 'sell', quantity: position, balance });
                 }
                 // Open short position - only use margin
-                const margin = roundTo8((price * quantity) / leverage);
+                const margin = roundTo8((price * adjustedQuantity) / leverage);
                 balance = roundTo8(balance - margin);
-                position = -quantity;
+                position = -adjustedQuantity;
                 entryPrice = price; // Set entry price for short position
-                trades.push({ time: candles[i].time, price, side: 'sell', quantity, balance });
+                trades.push({ time: candles[i].time, price, side: 'sell', quantity: adjustedQuantity, balance });
                 lastSignal = 'sell';
             }
         } else {
             // Spot trading logic (original behavior)
-            if (signal === 'buy' && lastSignal !== 'buy' && balance >= price * quantity) {
-                balance = roundTo8(balance - price * quantity);
-                position += quantity;
-                trades.push({ time: candles[i].time, price, side: 'buy', quantity, balance });
+            if (signal === 'buy' && lastSignal !== 'buy' && balance >= price * adjustedQuantity) {
+                balance = roundTo8(balance - price * adjustedQuantity);
+                position += adjustedQuantity;
+                trades.push({ time: candles[i].time, price, side: 'buy', quantity: adjustedQuantity, balance });
                 lastSignal = 'buy';
-            } else if (signal === 'sell' && lastSignal !== 'sell' && position >= quantity) {
-                balance = roundTo8(balance + price * quantity);
-                position -= quantity;
-                trades.push({ time: candles[i].time, price, side: 'sell', quantity, balance });
+            } else if (signal === 'sell' && lastSignal !== 'sell' && position >= adjustedQuantity) {
+                balance = roundTo8(balance + price * adjustedQuantity);
+                position -= adjustedQuantity;
+                trades.push({ time: candles[i].time, price, side: 'sell', quantity: adjustedQuantity, balance });
                 lastSignal = 'sell';
             }
+        }
+
+        // Update drawdown state
+        if (balance > drawdownState.peakBalance) {
+            drawdownState.peakBalance = balance;
+            drawdownState.lastPeakTime = currentTime;
         }
     }
 
@@ -392,12 +497,36 @@ export function calculateStochastic(
  * Buy when RSI crosses above oversold level, sell when RSI crosses below overbought level
  */
 export function runRSIBacktest(candles: Candle[], params: any): BacktestResult {
-    const { period, overbought, oversold, quantity, initialBalance, marketType = 'spot', leverage = 1, positionSide = 'both' } = params;
+    const { 
+        period, 
+        overbought, 
+        oversold, 
+        quantity, 
+        initialBalance, 
+        marketType = 'spot', 
+        leverage = 1, 
+        positionSide = 'both',
+        // Enhanced features
+        volatilityConfig,
+        drawdownConfig,
+        confirmationSignals,
+    } = params;
+    
     let balance = initialBalance;
     let position = 0;
     let entryPrice = 0; // Track entry price for PnL calculation
     let lastSignal: 'buy' | 'sell' | null = null;
     const trades: TradeLog[] = [];
+
+    // Enhanced features state
+    let drawdownState: DrawdownState = {
+        peakBalance: initialBalance,
+        currentDrawdown: 0,
+        maxDrawdownReached: 0,
+        lastPeakTime: Date.now(),
+    };
+    let volatilityRegime: 'low' | 'normal' | 'high' = 'normal';
+    let lastVolatilityCheck = 0;
 
     // Helper function to round to 8 decimal places (standard for crypto)
     const roundTo8 = (num: number): number => Math.round(num * 100000000) / 100000000;
@@ -414,6 +543,41 @@ export function runRSIBacktest(candles: Candle[], params: any): BacktestResult {
     const startIndex = period + 1;
     
     for (let i = startIndex; i < candles.length; i++) {
+        const currentTime = candles[i].time;
+        
+        // Check drawdown protection
+        if (drawdownConfig?.enabled) {
+            const drawdownResult = updateDrawdownState(drawdownState, balance, drawdownConfig);
+            if (drawdownResult.shouldStop) {
+                // Stop trading due to drawdown limit
+                break;
+            }
+            drawdownState = {
+                ...drawdownState,
+                currentDrawdown: calculateDrawdown(balance, drawdownState.peakBalance),
+            };
+        }
+
+        // Check volatility regime every 5 minutes (300000ms)
+        if (volatilityConfig?.enabled && currentTime - lastVolatilityCheck > 300000) {
+            const availableCandles = candles.slice(0, i + 1);
+            if (availableCandles.length >= volatilityConfig.atrPeriod) {
+                volatilityRegime = detectVolatilityRegime(availableCandles, volatilityConfig);
+            }
+            lastVolatilityCheck = currentTime;
+        }
+
+        // Get volatility-adjusted parameters
+        let adjustedQuantity = quantity;
+        if (volatilityConfig?.enabled) {
+            const adjustedParams = getVolatilityAdjustedParams(
+                { quantity },
+                volatilityRegime,
+                volatilityConfig
+            );
+            adjustedQuantity = adjustedParams.quantity;
+        }
+
         const rsiIndex = i - startIndex;
         if (rsiIndex >= rsiValues.length) break;
 
@@ -429,6 +593,29 @@ export function runRSIBacktest(candles: Candle[], params: any): BacktestResult {
             signal = 'buy'; // Bullish signal (oversold)
         } else if (currentRSI >= overbought) {
             signal = 'sell'; // Bearish signal (overbought)
+        }
+
+        // Apply confirmation signals if enabled
+        if (signal && confirmationSignals) {
+            const conf = confirmationSignals;
+            
+            // Volume confirmation
+            if (conf.useVolume) {
+                const volumes = candles.map(c => c.volume);
+                const avgVolume = volumes.slice(Math.max(0, i - 20), i + 1).reduce((a, b) => a + b, 0) / Math.min(21, i + 1);
+                const currentVolume = candles[i].volume;
+                if (currentVolume < avgVolume * conf.volumeThreshold) {
+                    signal = null; // Insufficient volume
+                }
+            }
+            
+            // Trend strength confirmation (using RSI trend)
+            if (signal && conf.useTrendStrength) {
+                const rsiTrend = Math.abs(currentRSI - 50) / 50 * 100; // Distance from neutral 50
+                if (rsiTrend < conf.minTrendStrength) {
+                    signal = null; // RSI trend too weak
+                }
+            }
         }
 
         // Apply position side filtering
@@ -450,11 +637,11 @@ export function runRSIBacktest(candles: Candle[], params: any): BacktestResult {
                     trades.push({ time: candles[i].time, price, side: 'buy', quantity: Math.abs(position), balance });
                 }
                 // Open long position - only use margin
-                const margin = roundTo8((price * quantity) / leverage);
+                const margin = roundTo8((price * adjustedQuantity) / leverage);
                 balance = roundTo8(balance - margin);
-                position = quantity;
+                position = adjustedQuantity;
                 entryPrice = price; // Set entry price for long position
-                trades.push({ time: candles[i].time, price, side: 'buy', quantity, balance });
+                trades.push({ time: candles[i].time, price, side: 'buy', quantity: adjustedQuantity, balance });
                 lastSignal = 'buy';
             } else if (signal === 'sell' && position >= 0) {
                 // Open short position or close long position
@@ -465,38 +652,44 @@ export function runRSIBacktest(candles: Candle[], params: any): BacktestResult {
                     trades.push({ time: candles[i].time, price, side: 'sell', quantity: position, balance });
                 }
                 // Open short position - only use margin
-                const margin = roundTo8((price * quantity) / leverage);
+                const margin = roundTo8((price * adjustedQuantity) / leverage);
                 balance = roundTo8(balance - margin);
-                position = -quantity;
+                position = -adjustedQuantity;
                 entryPrice = price; // Set entry price for short position
-                trades.push({ time: candles[i].time, price, side: 'sell', quantity, balance });
+                trades.push({ time: candles[i].time, price, side: 'sell', quantity: adjustedQuantity, balance });
                 lastSignal = 'sell';
             }
         } else {
             // Spot trading logic (original behavior)
-            if (signal === 'buy' && lastSignal !== 'buy' && position === 0 && balance >= price * quantity) {
-                balance = roundTo8(balance - price * quantity);
-                position += quantity;
+            if (signal === 'buy' && lastSignal !== 'buy' && position === 0 && balance >= price * adjustedQuantity) {
+                balance = roundTo8(balance - price * adjustedQuantity);
+                position += adjustedQuantity;
                 trades.push({ 
                     time: candles[i].time, 
                     price, 
                     side: 'buy', 
-                    quantity, 
+                    quantity: adjustedQuantity, 
                     balance 
                 });
                 lastSignal = 'buy';
             } else if (signal === 'sell' && lastSignal !== 'sell' && position > 0) {
-                balance = roundTo8(balance + price * quantity);
-                position -= quantity;
+                balance = roundTo8(balance + price * adjustedQuantity);
+                position -= adjustedQuantity;
                 trades.push({ 
                     time: candles[i].time, 
                     price, 
                     side: 'sell', 
-                    quantity, 
+                    quantity: adjustedQuantity, 
                     balance 
                 });
                 lastSignal = 'sell';
             }
+        }
+
+        // Update drawdown state
+        if (balance > drawdownState.peakBalance) {
+            drawdownState.peakBalance = balance;
+            drawdownState.lastPeakTime = currentTime;
         }
     }
 
@@ -550,51 +743,105 @@ export function runRSIBacktest(candles: Candle[], params: any): BacktestResult {
 // --- Modular Signal Generators ---
 
 /**
- * Moving Average Crossover Signal Generator
+ * Enhanced Moving Average Crossover Signal Generator with confirmation signals
  * @param candles Array of Candle objects
  * @param state Any state object (can be used for last signal, etc.)
- * @param params { shortPeriod, longPeriod, positionSide?, marketType? }
+ * @param params { shortPeriod, longPeriod, positionSide?, marketType?, confirmationSignals? }
  * @returns 'buy' | 'sell' | null
  */
-export function generateMovingAverageSignal(
+export function generateEnhancedMovingAverageSignal(
     candles: Candle[],
     state: any,
-    params: { shortPeriod: number; longPeriod: number; positionSide?: string; marketType?: string }
+    params: { 
+        shortPeriod: number; 
+        longPeriod: number; 
+        positionSide?: string; 
+        marketType?: string;
+        confirmationSignals?: {
+            useRSI: boolean;
+            rsiPeriod: number;
+            rsiOverbought: number;
+            rsiOversold: number;
+            useVolume: boolean;
+            volumeThreshold: number;
+            useTrendStrength: boolean;
+            minTrendStrength: number;
+        };
+    }
 ): 'buy' | 'sell' | null {
-    const { shortPeriod, longPeriod, positionSide = 'both', marketType = 'spot' } = params;
+    if (candles.length < Math.max(params.shortPeriod, params.longPeriod)) {
+        return null;
+    }
+
     const closes = candles.map(c => c.close);
+    const volumes = candles.map(c => c.volume);
     
-    if (closes.length < Math.max(shortPeriod, longPeriod)) return null;
+    // Calculate moving averages
+    const shortMA = calculateSMA(closes, params.shortPeriod);
+    const longMA = calculateSMA(closes, params.longPeriod);
     
-    const shortMA = calculateSMA(closes, shortPeriod);
-    const longMA = calculateSMA(closes, longPeriod);
-    
-    if (shortMA === null || longMA === null) return null;
-    
-    // Determine signal based on MA crossover
+    if (shortMA === null || longMA === null) {
+        return null;
+    }
+
+    // Basic MA crossover signal
     let signal: 'buy' | 'sell' | null = null;
     if (shortMA > longMA) {
-        signal = 'buy'; // Bullish signal
+        signal = 'buy';
     } else if (shortMA < longMA) {
-        signal = 'sell'; // Bearish signal
+        signal = 'sell';
     }
-    
+
     // Apply position side filtering
+    const positionSide = params.positionSide || 'both';
     if (positionSide === 'long' && signal === 'sell') {
-        signal = null; // Block bearish signals for long-only
+        signal = null;
     } else if (positionSide === 'short' && signal === 'buy') {
-        signal = null; // Block bullish signals for short-only
+        signal = null;
     }
-    
+
+    // Apply confirmation signals if enabled
+    if (signal && params.confirmationSignals) {
+        const conf = params.confirmationSignals;
+        
+        // RSI confirmation
+        if (conf.useRSI) {
+            const rsiValues = calculateRSI(closes, conf.rsiPeriod);
+            if (rsiValues.length > 0) {
+                const currentRSI = rsiValues[rsiValues.length - 1];
+                if (signal === 'buy' && currentRSI > conf.rsiOverbought) {
+                    signal = null; // Overbought, don't buy
+                } else if (signal === 'sell' && currentRSI < conf.rsiOversold) {
+                    signal = null; // Oversold, don't sell
+                }
+            }
+        }
+        
+        // Volume confirmation
+        if (conf.useVolume && signal) {
+            const avgVolume = volumes.slice(-20).reduce((sum, vol) => sum + vol, 0) / 20;
+            const currentVolume = volumes[volumes.length - 1];
+            if (currentVolume < avgVolume * conf.volumeThreshold) {
+                signal = null; // Low volume, weak signal
+            }
+        }
+        
+        // Trend strength confirmation
+        if (conf.useTrendStrength && signal) {
+            const trendStrength = Math.abs(shortMA - longMA) / longMA * 100;
+            if (trendStrength < conf.minTrendStrength) {
+                signal = null; // Weak trend, avoid trading
+            }
+        }
+    }
+
     // For futures, we need to consider current position
-    if (marketType === 'futures') {
+    if (params.marketType === 'futures') {
         const currentPosition = state?.position || 0;
         
         if (signal === 'buy' && currentPosition <= 0) {
-            // Can open long or close short
             return 'buy';
         } else if (signal === 'sell' && currentPosition >= 0) {
-            // Can open short or close long
             return 'sell';
         }
         return null;
@@ -712,7 +959,7 @@ export function calculateATR(candles: Candle[], period: number = 14): number[] {
 
 // --- Strategy Registry ---
 export const strategyRegistry: Record<string, Function> = {
-    'moving_average': generateMovingAverageSignal,
+    'moving_average': generateEnhancedMovingAverageSignal,
     'rsi': generateRSISignal,
     // Add more strategies here
 }; 
@@ -880,23 +1127,139 @@ export function interpretConfigStrategy(
 export function runConfigStrategyBacktest(
     candles: Candle[],
     config: { indicators: any[]; rules: any[]; risk: any },
-    params: { quantity: number; initialBalance: number; marketType?: string; leverage?: number; positionSide?: string }
+    params: { 
+        quantity: number; 
+        initialBalance: number; 
+        marketType?: string; 
+        leverage?: number; 
+        positionSide?: string;
+        // Enhanced features
+        volatilityConfig?: VolatilityConfig;
+        drawdownConfig?: DrawdownConfig;
+        confirmationSignals?: {
+            useRSI: boolean;
+            rsiPeriod: number;
+            rsiOverbought: number;
+            rsiOversold: number;
+            useVolume: boolean;
+            volumeThreshold: number;
+            useTrendStrength: boolean;
+            minTrendStrength: number;
+        };
+    }
 ): BacktestResult {
-    const { quantity, initialBalance, marketType = 'spot', leverage = 1, positionSide = 'both' } = params;
+    const { 
+        quantity, 
+        initialBalance, 
+        marketType = 'spot', 
+        leverage = 1, 
+        positionSide = 'both',
+        // Enhanced features
+        volatilityConfig,
+        drawdownConfig,
+        confirmationSignals,
+    } = params;
+    
     let balance = initialBalance;
     let position = 0;
     let entryPrice = 0;
     let lastSignal: 'buy' | 'sell' | null = null;
     const trades: TradeLog[] = [];
+
+    // Enhanced features state
+    let drawdownState: DrawdownState = {
+        peakBalance: initialBalance,
+        currentDrawdown: 0,
+        maxDrawdownReached: 0,
+        lastPeakTime: Date.now(),
+    };
+    let volatilityRegime: 'low' | 'normal' | 'high' = 'normal';
+    let lastVolatilityCheck = 0;
+
     const roundTo8 = (num: number): number => Math.round(num * 100000000) / 100000000;
     const tpPct = config.risk?.takeProfit ? config.risk.takeProfit / 100 : 0.005; // default 0.5%
     const slPct = config.risk?.stopLoss ? config.risk.stopLoss / 100 : 0.003; // default 0.3%
 
     for (let i = 0; i < candles.length; i++) {
+        const currentTime = candles[i].time;
+        
+        // Check drawdown protection
+        if (drawdownConfig?.enabled) {
+            const drawdownResult = updateDrawdownState(drawdownState, balance, drawdownConfig);
+            if (drawdownResult.shouldStop) {
+                // Stop trading due to drawdown limit
+                break;
+            }
+            drawdownState = {
+                ...drawdownState,
+                currentDrawdown: calculateDrawdown(balance, drawdownState.peakBalance),
+            };
+        }
+
+        // Check volatility regime every 5 minutes (300000ms)
+        if (volatilityConfig?.enabled && currentTime - lastVolatilityCheck > 300000) {
+            const availableCandles = candles.slice(0, i + 1);
+            if (availableCandles.length >= volatilityConfig.atrPeriod) {
+                volatilityRegime = detectVolatilityRegime(availableCandles, volatilityConfig);
+            }
+            lastVolatilityCheck = currentTime;
+        }
+
+        // Get volatility-adjusted parameters
+        let adjustedQuantity = quantity;
+        if (volatilityConfig?.enabled) {
+            const adjustedParams = getVolatilityAdjustedParams(
+                { quantity },
+                volatilityRegime,
+                volatilityConfig
+            );
+            adjustedQuantity = adjustedParams.quantity;
+        }
+
         const slicedCandles = candles.slice(0, i + 1);
         const state = { lastSignal, position, entryPrice };
         let signal = interpretConfigStrategy(slicedCandles, state, config);
         const price = candles[i].close;
+
+        // Apply confirmation signals if enabled
+        if (signal && confirmationSignals) {
+            const conf = confirmationSignals;
+            
+            // RSI confirmation
+            if (conf.useRSI) {
+                const rsiValues = calculateRSI(candles.map(c => c.close), conf.rsiPeriod);
+                if (rsiValues.length > i) {
+                    const currentRSI = rsiValues[i];
+                    if (signal === 'buy' && currentRSI > conf.rsiOverbought) {
+                        signal = null; // Avoid buying in overbought conditions
+                    } else if (signal === 'sell' && currentRSI < conf.rsiOversold) {
+                        signal = null; // Avoid selling in oversold conditions
+                    }
+                }
+            }
+            
+            // Volume confirmation
+            if (signal && conf.useVolume) {
+                const volumes = candles.map(c => c.volume);
+                const avgVolume = volumes.slice(Math.max(0, i - 20), i + 1).reduce((a, b) => a + b, 0) / Math.min(21, i + 1);
+                const currentVolume = candles[i].volume;
+                if (currentVolume < avgVolume * conf.volumeThreshold) {
+                    signal = null; // Insufficient volume
+                }
+            }
+            
+            // Trend strength confirmation (using price momentum)
+            if (signal && conf.useTrendStrength) {
+                const lookback = Math.min(20, i);
+                if (lookback > 0) {
+                    const recentPrices = candles.slice(i - lookback, i + 1).map(c => c.close);
+                    const priceChange = (recentPrices[recentPrices.length - 1] - recentPrices[0]) / recentPrices[0] * 100;
+                    if (Math.abs(priceChange) < conf.minTrendStrength) {
+                        signal = null; // Trend too weak
+                    }
+                }
+            }
+        }
 
         // Position side filtering
         if (positionSide === 'long' && signal === 'sell') signal = null;
@@ -933,9 +1296,9 @@ export function runConfigStrategyBacktest(
                     trades.push({ time: candles[i].time, price, side: 'buy', quantity: Math.abs(position), balance });
                 }
                 // Open long
-                position = quantity;
+                position = adjustedQuantity;
                 entryPrice = price;
-                trades.push({ time: candles[i].time, price, side: 'buy', quantity, balance });
+                trades.push({ time: candles[i].time, price, side: 'buy', quantity: adjustedQuantity, balance });
                 lastSignal = 'buy';
             } else if (signal === 'sell' && position >= 0) {
                 // Close long if needed
@@ -945,24 +1308,30 @@ export function runConfigStrategyBacktest(
                     trades.push({ time: candles[i].time, price, side: 'sell', quantity: position, balance });
                 }
                 // Open short
-                position = -quantity;
+                position = -adjustedQuantity;
                 entryPrice = price;
-                trades.push({ time: candles[i].time, price, side: 'sell', quantity, balance });
+                trades.push({ time: candles[i].time, price, side: 'sell', quantity: adjustedQuantity, balance });
                 lastSignal = 'sell';
             }
         } else {
             // Spot logic
-            if (signal === 'buy' && lastSignal !== 'buy' && position === 0 && balance >= price * quantity) {
-                balance = roundTo8(balance - price * quantity);
-                position += quantity;
-                trades.push({ time: candles[i].time, price, side: 'buy', quantity, balance });
+            if (signal === 'buy' && lastSignal !== 'buy' && position === 0 && balance >= price * adjustedQuantity) {
+                balance = roundTo8(balance - price * adjustedQuantity);
+                position += adjustedQuantity;
+                trades.push({ time: candles[i].time, price, side: 'buy', quantity: adjustedQuantity, balance });
                 lastSignal = 'buy';
             } else if (signal === 'sell' && lastSignal !== 'sell' && position > 0) {
-                balance = roundTo8(balance + price * quantity);
-                position -= quantity;
-                trades.push({ time: candles[i].time, price, side: 'sell', quantity, balance });
+                balance = roundTo8(balance + price * adjustedQuantity);
+                position -= adjustedQuantity;
+                trades.push({ time: candles[i].time, price, side: 'sell', quantity: adjustedQuantity, balance });
                 lastSignal = 'sell';
             }
+        }
+
+        // Update drawdown state
+        if (balance > drawdownState.peakBalance) {
+            drawdownState.peakBalance = balance;
+            drawdownState.lastPeakTime = currentTime;
         }
     }
 
@@ -993,4 +1362,149 @@ export function runConfigStrategyBacktest(
     }
     const winRate = total > 0 ? wins / total : 0;
     return { trades, pnl, winRate, finalBalance: balance };
+} 
+
+/**
+ * Volatility-based strategy switching
+ * Detects market volatility and adjusts strategy parameters
+ */
+export interface VolatilityConfig {
+    enabled: boolean;
+    atrPeriod: number;
+    lowVolatilityThreshold: number;
+    highVolatilityThreshold: number;
+    lowVolStrategy: {
+        shortPeriod: number;
+        longPeriod: number;
+        quantity: number;
+    };
+    highVolStrategy: {
+        shortPeriod: number;
+        longPeriod: number;
+        quantity: number;
+    };
+    normalStrategy: {
+        shortPeriod: number;
+        longPeriod: number;
+        quantity: number;
+    };
+}
+
+export function detectVolatilityRegime(candles: Candle[], config: VolatilityConfig): 'low' | 'normal' | 'high' {
+    if (!config.enabled) return 'normal';
+    
+    const atrValues = calculateATR(candles, config.atrPeriod);
+    if (atrValues.length === 0) return 'normal';
+    
+    const currentATR = atrValues[atrValues.length - 1];
+    const avgATR = atrValues.slice(-20).reduce((sum, val) => sum + val, 0) / Math.min(20, atrValues.length);
+    const volatilityRatio = currentATR / avgATR;
+    
+    if (volatilityRatio < config.lowVolatilityThreshold) {
+        return 'low';
+    } else if (volatilityRatio > config.highVolatilityThreshold) {
+        return 'high';
+    } else {
+        return 'normal';
+    }
+}
+
+export function getVolatilityAdjustedParams(
+    baseParams: any,
+    volatilityRegime: 'low' | 'normal' | 'high',
+    config: VolatilityConfig
+): any {
+    if (!config.enabled) return baseParams;
+    
+    switch (volatilityRegime) {
+        case 'low':
+            return {
+                ...baseParams,
+                shortPeriod: config.lowVolStrategy.shortPeriod,
+                longPeriod: config.lowVolStrategy.longPeriod,
+                quantity: config.lowVolStrategy.quantity
+            };
+        case 'high':
+            return {
+                ...baseParams,
+                shortPeriod: config.highVolStrategy.shortPeriod,
+                longPeriod: config.highVolStrategy.longPeriod,
+                quantity: config.highVolStrategy.quantity
+            };
+        default:
+            return {
+                ...baseParams,
+                shortPeriod: config.normalStrategy.shortPeriod,
+                longPeriod: config.normalStrategy.longPeriod,
+                quantity: config.normalStrategy.quantity
+            };
+    }
+} 
+
+/**
+ * Drawdown tracking and stop logic
+ */
+export interface DrawdownConfig {
+    enabled: boolean;
+    maxDrawdown: number; // percentage
+    trailingStop: boolean;
+    trailingStopDistance: number; // percentage
+}
+
+export interface DrawdownState {
+    peakBalance: number;
+    currentDrawdown: number;
+    maxDrawdownReached: number;
+    lastPeakTime: number;
+}
+
+export function calculateDrawdown(currentBalance: number, peakBalance: number): number {
+    if (peakBalance <= 0) return 0;
+    return ((peakBalance - currentBalance) / peakBalance) * 100;
+}
+
+export function updateDrawdownState(
+    state: DrawdownState,
+    currentBalance: number,
+    config: DrawdownConfig
+): { shouldStop: boolean; reason?: string } {
+    if (!config.enabled) return { shouldStop: false };
+    
+    // Update peak balance if we have a new high
+    if (currentBalance > state.peakBalance) {
+        state.peakBalance = currentBalance;
+        state.lastPeakTime = Date.now();
+    }
+    
+    // Calculate current drawdown
+    state.currentDrawdown = calculateDrawdown(currentBalance, state.peakBalance);
+    
+    // Update max drawdown reached
+    if (state.currentDrawdown > state.maxDrawdownReached) {
+        state.maxDrawdownReached = state.currentDrawdown;
+    }
+    
+    // Check if we should stop trading
+    if (state.currentDrawdown >= config.maxDrawdown) {
+        return { 
+            shouldStop: true, 
+            reason: `Maximum drawdown exceeded: ${state.currentDrawdown.toFixed(2)}%` 
+        };
+    }
+    
+    // Trailing stop logic
+    if (config.trailingStop && state.currentDrawdown > config.trailingStopDistance) {
+        const timeSincePeak = Date.now() - state.lastPeakTime;
+        const hoursSincePeak = timeSincePeak / (1000 * 60 * 60);
+        
+        // If we've been in drawdown for more than 24 hours, stop
+        if (hoursSincePeak > 24) {
+            return { 
+                shouldStop: true, 
+                reason: `Trailing stop triggered: ${hoursSincePeak.toFixed(1)} hours in drawdown` 
+            };
+        }
+    }
+    
+    return { shouldStop: false };
 } 
