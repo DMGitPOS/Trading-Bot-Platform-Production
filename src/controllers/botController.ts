@@ -15,7 +15,8 @@ import { decrypt } from '../utils/crypto';
 import { AuthRequest } from "../middleware/auth";
 import ManualTradeSignal from '../models/ManualTradeSignal';
 import { runBot } from '../services/botRunner';
-import Strategy from '../models/Strategy';
+import Strategy, { IStrategy } from '../models/Strategy';
+import { runConfigStrategyBacktest } from '../services/strategyEngine';
 
 const createBotSchema = Joi.object({
     name: Joi.string().min(2).max(50).required(),
@@ -109,6 +110,19 @@ const rsiBacktestSchema = Joi.object({
     positionSide: Joi.string().valid('both', 'long', 'short').default('both'),
 });
 
+const customBacktestSchema = Joi.object({
+    strategy: Joi.string().required(),
+    symbol: Joi.string().required(),
+    quantity: Joi.number().positive().required(),
+    initialBalance: Joi.number().positive().required(),
+    interval: Joi.string().required(),
+    limit: Joi.number().integer().min(1).optional(),
+    exchange: Joi.string().optional(),
+    marketType: Joi.string().valid('spot', 'futures').default('spot'),
+    leverage: Joi.number().min(1).max(125).default(1),
+    positionSide: Joi.string().valid('both', 'long', 'short').default('both'),
+});
+
 // Joi schema for backtestBotStrategy
 const backtestBotStrategySchema = Joi.object({
     strategyName: Joi.string().required(),
@@ -142,21 +156,7 @@ export const createBot = async (req: Request, res: Response) => {
         if (!strategy || typeof strategy !== 'object' || !strategy.type) {
             return res.status(400).json({ error: 'Strategy is required and must have a type.' });
         }
-        if (strategy.type === 'custom') {
-            // Must provide a valid strategyId or name
-            const strategyId = strategy.strategyId || strategy.id || strategy.name;
-            if (!strategyId) {
-                return res.status(400).json({ error: 'Custom strategy must reference a valid strategyId or name.' });
-            }
-            const userId = (req as AuthRequest).user?.id;
-            const customStrategy = await Strategy.findOne({ $or: [ { _id: strategyId }, { name: strategyId } ], user: userId });
-            if (!customStrategy) {
-                return res.status(400).json({ error: 'Referenced custom strategy not found or not owned by user.' });
-            }
-            if (customStrategy.type !== 'custom' || !customStrategy.code) {
-                return res.status(400).json({ error: 'Referenced strategy is not a valid custom strategy.' });
-            }
-        } else if (strategy.type === 'config') {
+        if (strategy.type === 'config') {
             // Must provide config with indicators and rules arrays
             if (!strategy.config || typeof strategy.config !== 'object') {
                 return res.status(400).json({ error: 'Config strategy must include a config object.' });
@@ -295,20 +295,7 @@ export const updateBot = async (req: Request, res: Response) => {
             if (!strategy.type) {
                 return res.status(400).json({ error: 'Strategy type is required.' });
             }
-            if (strategy.type === 'custom') {
-                const strategyId = strategy.strategyId || strategy.id || strategy.name;
-                if (!strategyId) {
-                    return res.status(400).json({ error: 'Custom strategy must reference a valid strategyId or name.' });
-                }
-                const userId = (req as AuthRequest).user?.id;
-                const customStrategy = await Strategy.findOne({ $or: [ { _id: strategyId }, { name: strategyId } ], user: userId });
-                if (!customStrategy) {
-                    return res.status(400).json({ error: 'Referenced custom strategy not found or not owned by user.' });
-                }
-                if (customStrategy.type !== 'custom' || !customStrategy.code) {
-                    return res.status(400).json({ error: 'Referenced strategy is not a valid custom strategy.' });
-                }
-            } else if (strategy.type === 'config') {
+            if (strategy.type === 'config') {
                 if (!strategy.config || typeof strategy.config !== 'object') {
                     return res.status(400).json({ error: 'Config strategy must include a config object.' });
                 }
@@ -580,14 +567,29 @@ export const getBotPerformance = async (req: Request, res: Response) => {
 
 export const backtestBot = async (req: Request, res: Response) => {
     try {
-        const { strategy = 'moving_average' } = req.body;
+        const { strategy = 'moving_average', config } = req.body;
+        // Support config-based strategies
+        if (strategy === 'config' && config) {
+            // Validate config (optional: add schema validation)
+            const {
+                candles,
+                quantity,
+                initialBalance,
+            } = req.body;
+            // Use runConfigStrategyBacktest for config-based strategies
+            const result = runConfigStrategyBacktest(candles, config, {
+                quantity: quantity || 1,
+                initialBalance: initialBalance || 1000,
+            });
+            return res.status(201).json(result);
+        }
         let validationSchema;
         if (strategy === 'moving_average') {
             validationSchema = movingAverageBacktestSchema;
         } else if (strategy === 'rsi') {
             validationSchema = rsiBacktestSchema;
         } else {
-            return res.status(400).json({ error: 'Unsupported strategy type. Supported: moving_average, rsi' });
+            validationSchema = customBacktestSchema;
         }
 
         const { error } = validationSchema.validate(req.body);
@@ -647,8 +649,17 @@ export const backtestBot = async (req: Request, res: Response) => {
                 positionSide,
             };
             result = runRSIBacktest(candles, rsiParams);
+        } else {
+            const strategyResult: any = await Strategy.findById(strategy);
+            if (!strategyResult) {
+                return res.status(404).json({ message: 'Strategy not found' });
+            }
+            // Use runConfigStrategyBacktest for config-based strategies
+            result = runConfigStrategyBacktest(candles, strategyResult.config, {
+                quantity,
+                initialBalance,
+            });
         }
-
         // Return the params for confirmation (for now)
         res.status(201).json({ ...result, marketType, leverage, positionSide });
     } catch (error) {
@@ -835,13 +846,12 @@ export const updateBotApiKey = async (req: Request, res: Response) => {
     } catch (error) {
         res.status(500).json({ error: 'Update bot api key failed' });
     }
-}; 
+};
 
 export const backtestBotStrategy = async (req: Request, res: Response) => {
     try {
         const { error } = backtestBotStrategySchema.validate(req.body);
         if (error) return res.status(400).json({ error: error.details[0].message });
-
         const { strategyName, candles, params, initialBalance } = req.body;
         const result = runStrategyBacktest(strategyName, candles, params, initialBalance);
 

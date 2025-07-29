@@ -5,15 +5,11 @@ import { AuthRequest } from '../middleware/auth';
 
 const strategySchema = Joi.object({
     name: Joi.string().required(),
-    type: Joi.string().required(),
-    code: Joi.string().allow('').optional(),
     config: Joi.object().optional()
 });
 
 const updateStrategySchema = Joi.object({
     name: Joi.string().optional(),
-    type: Joi.string().optional(),
-    code: Joi.string().allow('').optional(),
     config: Joi.object().optional()
 });
 
@@ -87,8 +83,6 @@ export const updateStrategy = async (req: Request, res: Response) => {
         if (!strategy) return res.status(404).json({ error: 'Strategy not found' });
         
         if (name) strategy.name = name;
-        if (type) strategy.type = type;
-        if (code !== undefined) strategy.code = code;
         if (config !== undefined) strategy.config = config;
         await strategy.save();
         res.status(200).json(strategy);

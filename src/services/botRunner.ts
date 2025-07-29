@@ -10,7 +10,6 @@ import { strategyRegistry, interpretConfigStrategy } from './strategyEngine';
 import { notifyUser } from './notification/notifyUser';
 import ManualTradeSignal from '../models/ManualTradeSignal';
 import Strategy from '../models/Strategy';
-import { VM } from 'vm2';
 
 interface StrategyState {
     lastSignal: 'buy' | 'sell' | null;
@@ -20,6 +19,8 @@ interface StrategyState {
     dailyPnL: number;
     lastTradeDate: string | null;
     lastFundingTime?: number; // Track last funding time for funding payments
+    entryPrice?: number; // Track entry price for PnL calculation
+    isLongPosition?: boolean; // Track if current position is long or short
 }
 
 // In-memory state tracking for each bot (in production, persist in DB or use a distributed queue)
@@ -49,6 +50,9 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
     }
 
     const botId = (bot._id as mongoose.Types.ObjectId).toString();
+
+    // Helper function to round to 8 decimal places (standard for crypto)
+    const roundTo8 = (num: number): number => Math.round(num * 100000000) / 100000000;
 
     // Initialize bot state if not exists
     if (!botStates[botId]) {
@@ -125,39 +129,7 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
         let strategyName: string = (typeof bot.strategy?.name === 'string' && bot.strategy?.name) ? bot.strategy.name : 'moving_average';
         let strategyParams = bot.strategy?.parameters || { shortPeriod, longPeriod };
         let signal: 'buy' | 'sell' | null = null;
-        if (bot.strategy?.type === 'custom') {
-            // Fetch custom strategy code from DB
-            try {
-                const customStrategy = await Strategy.findOne({ _id: bot.strategy?.strategyId || bot.strategy?.id || bot.strategy?.name });
-                if (!customStrategy || !customStrategy.code) {
-                    throw new Error('Custom strategy code not found');
-                }
-                // Use vm2 to safely execute user code
-                const vm = new VM({ timeout: 1000, sandbox: {} });
-                // The user code must export a function: module.exports = function(candles, state, params) { ... }
-                const wrapper = `module = {}; exports = {}; ${customStrategy.code}; module.exports`;
-                const userFn = vm.run(wrapper);
-                if (typeof userFn === 'function') {
-                    const result = userFn(candles, state, strategyParams);
-                    if (result === 'buy' || result === 'sell' || result === null) {
-                        signal = result;
-                    } else {
-                        throw new Error('Custom strategy must return "buy", "sell", or null');
-                    }
-                } else {
-                    throw new Error('Custom strategy did not export a function');
-                }
-            } catch (err) {
-                console.error(`Bot ${bot.name}: Failed to execute custom strategy:`, err);
-                await notifyUser({
-                    userId: bot.user.toString(),
-                    type: 'error',
-                    message: `Bot ${bot.name}: Custom strategy execution failed: ${err instanceof Error ? err.message : String(err)}`,
-                    botName: bot.name,
-                });
-                signal = null;
-            }
-        } else if (bot.strategy?.type === 'config') {
+        if (bot.strategy?.type === 'config') {
             // Interpret config-based strategy (visual builder)
             try {
                 const config = bot.strategy?.config && typeof bot.strategy.config === 'object'
@@ -171,6 +143,100 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
                 if (signal !== 'buy' && signal !== 'sell' && signal !== null) {
                     throw new Error('Config strategy must return "buy", "sell", or null');
                 }
+                // --- TP/SL and Auto-Reverse Logic ---
+                const tpPct = config.risk?.takeProfit ? config.risk.takeProfit / 100 : 0.005;
+                const slPct = config.risk?.stopLoss ? config.risk.stopLoss / 100 : 0.003;
+                const autoReverse = config.risk?.autoReverse !== false; // default true
+                if (state.position !== 0 && state.entryPrice) {
+                    const tp = state.position > 0 ? state.entryPrice * (1 + tpPct) : state.entryPrice * (1 - tpPct);
+                    const sl = state.position > 0 ? state.entryPrice * (1 - slPct) : state.entryPrice * (1 + slPct);
+                    if ((state.position > 0 && (currentPrice >= tp || currentPrice <= sl)) ||
+                        (state.position < 0 && (currentPrice <= tp || currentPrice >= sl))) {
+                        // Close position for TP/SL
+                        if (bot.paperTrading) {
+                            if (state.position > 0) {
+                                await executePaperSellOrder(bot, symbol, state.position, currentPrice, state);
+                            } else {
+                                await executePaperBuyOrder(bot, symbol, Math.abs(state.position), currentPrice, state);
+                            }
+                        } else {
+                            if (state.position > 0) {
+                                await executeSellOrder(bot, exchangeService, symbol, state.position, currentPrice);
+                            } else {
+                                await executeBuyOrder(bot, exchangeService, symbol, Math.abs(state.position), currentPrice);
+                            }
+                        }
+                        state.position = 0;
+                        state.entryPrice = undefined;
+                        state.lastSignal = null;
+                        await notifyUser({
+                            userId: bot.user.toString(),
+                            type: 'alert',
+                            message: `Bot ${bot.name}: Position closed by TP/SL at ${currentPrice}`,
+                            botName: bot.name,
+                        });
+                        return;
+                    }
+                }
+                // --- Auto-Reverse Logic ---
+                if (signal === 'buy' && state.position <= 0) {
+                    // If short, close and reverse
+                    if (state.position < 0) {
+                        if (bot.paperTrading) {
+                            await executePaperBuyOrder(bot, symbol, Math.abs(state.position), currentPrice, state);
+                        } else {
+                            await executeBuyOrder(bot, exchangeService, symbol, Math.abs(state.position), currentPrice);
+                        }
+                        state.position = 0;
+                        state.entryPrice = undefined;
+                        state.lastSignal = null;
+                    }
+                    if (state.position === 0 && (autoReverse || state.lastSignal !== 'buy')) {
+                        if (bot.paperTrading) {
+                            await executePaperBuyOrder(bot, symbol, quantity, currentPrice, state);
+                        } else {
+                            await executeBuyOrder(bot, exchangeService, symbol, quantity, currentPrice);
+                        }
+                        state.position = quantity;
+                        state.entryPrice = currentPrice;
+                        state.lastSignal = 'buy';
+                        await notifyUser({
+                            userId: bot.user.toString(),
+                            type: 'alert',
+                            message: `Bot ${bot.name}: BUY ${quantity} ${symbol} at ${currentPrice}`,
+                            botName: bot.name,
+                        });
+                    }
+                } else if (signal === 'sell' && state.position >= 0) {
+                    // If long, close and reverse
+                    if (state.position > 0) {
+                        if (bot.paperTrading) {
+                            await executePaperSellOrder(bot, symbol, state.position, currentPrice, state);
+                        } else {
+                            await executeSellOrder(bot, exchangeService, symbol, state.position, currentPrice);
+                        }
+                        state.position = 0;
+                        state.entryPrice = undefined;
+                        state.lastSignal = null;
+                    }
+                    if (state.position === 0 && (autoReverse || state.lastSignal !== 'sell')) {
+                        if (bot.paperTrading) {
+                            await executePaperSellOrder(bot, symbol, quantity, currentPrice, state);
+                        } else {
+                            await executeSellOrder(bot, exchangeService, symbol, quantity, currentPrice);
+                        }
+                        state.position = -quantity;
+                        state.entryPrice = currentPrice;
+                        state.lastSignal = 'sell';
+                        await notifyUser({
+                            userId: bot.user.toString(),
+                            type: 'alert',
+                            message: `Bot ${bot.name}: SELL ${quantity} ${symbol} at ${currentPrice}`,
+                            botName: bot.name,
+                        });
+                    }
+                }
+                return;
             } catch (err) {
                 console.error(`Bot ${bot.name}: Failed to interpret config strategy:`, err);
                 await notifyUser({
@@ -187,27 +253,18 @@ export async function runBot(bot: IBot, apiKey: IApiKey): Promise<void> {
             if (!strategyFn) {
                 throw new Error(`Strategy ${strategyName} not found`);
             }
-            signal = strategyFn(candles, state, strategyParams);
+            // Pass additional parameters for position side and market type
+            const enhancedParams = {
+                ...strategyParams,
+                positionSide: bot.positionSide,
+                marketType: bot.marketType,
+            };
+            signal = strategyFn(candles, state, enhancedParams);
         }
         // --- END DYNAMIC STRATEGY SELECTION ---
 
-        // Position Side logic for futures
+        // Position side filtering is now handled within the strategy functions
         let finalSignal = signal;
-        if (isFutures) {
-            if (bot.positionSide === 'long' && signal === 'sell') {
-                finalSignal = null; // Block short
-            } else if (bot.positionSide === 'short' && signal === 'buy') {
-                finalSignal = null; // Block long
-            }
-        }
-
-        // Remove old moving average signal logic (now handled by strategyFn)
-        // let signal: 'buy' | 'sell' | null = null;
-        // if (shortMA > longMA && state.lastSignal !== 'buy') {
-        //   signal = 'buy';
-        // } else if (shortMA < longMA && state.lastSignal !== 'sell' && currentPosition > 0) {
-        //   signal = 'sell';
-        // }
 
         // Check risk limits before executing trades
         if (!await checkRiskLimits(bot, state, finalSignal, currentPrice, quantity)) {
@@ -453,7 +510,10 @@ async function executePaperBuyOrder(
     state: StrategyState
 ): Promise<void> {
     try {
-        const tradeValue = price * quantity;
+        // Helper function to round to 8 decimal places
+        const roundTo8 = (num: number): number => Math.round(num * 100000000) / 100000000;
+        
+        const tradeValue = roundTo8(price * quantity);
         
         // Check if we have enough paper balance
         if (state.paperBalance < tradeValue) {
@@ -461,8 +521,29 @@ async function executePaperBuyOrder(
             return;
         }
 
+        // Calculate PnL if closing a short position
+        let pnl = 0;
+        if (state.position < 0 && state.entryPrice) {
+            // Closing short position: profit if price went down
+            pnl = roundTo8((state.entryPrice - price) * Math.abs(state.position));
+            state.dailyPnL = roundTo8(state.dailyPnL + pnl);
+        }
+
         // Update paper balance
-        state.paperBalance -= tradeValue;
+        state.paperBalance = roundTo8(state.paperBalance - tradeValue);
+
+        // Update position tracking
+        if (state.position < 0) {
+            // Closing short position
+            state.position = 0;
+            state.entryPrice = undefined;
+            state.isLongPosition = undefined;
+        } else {
+            // Opening long position
+            state.position = roundTo8(state.position + quantity);
+            state.entryPrice = price;
+            state.isLongPosition = true;
+        }
 
         // Record the paper trade
         await PaperTrade.create({
@@ -477,9 +558,10 @@ async function executePaperBuyOrder(
             exchange: bot.exchange,
             paperBalance: state.paperBalance,
             tradeType: 'paper',
+            pnl,
         });
 
-        console.log(`Bot ${bot.name}: PAPER BUY order executed - ${quantity} ${symbol} at ${price} (Balance: ${state.paperBalance})`);
+        console.log(`Bot ${bot.name}: PAPER BUY order executed - ${quantity} ${symbol} at ${price} (Balance: ${state.paperBalance}, PnL: ${pnl})`);
     } catch (error) {
         console.error(`Bot ${bot.name}: Failed to execute PAPER BUY order:`, error);
         throw error;
@@ -497,16 +579,33 @@ async function executePaperSellOrder(
     state: StrategyState
 ): Promise<void> {
     try {
-        const tradeValue = price * quantity;
+        // Helper function to round to 8 decimal places
+        const roundTo8 = (num: number): number => Math.round(num * 100000000) / 100000000;
         
-        // Update paper balance
-        state.paperBalance += tradeValue;
-
-        // Calculate PnL for this trade
+        const tradeValue = roundTo8(price * quantity);
+        
+        // Calculate PnL if closing a long position
         let pnl = 0;
-        if (state.lastTradePrice) {
-            pnl = (price - state.lastTradePrice) * quantity;
-            state.dailyPnL += pnl;
+        if (state.position > 0 && state.entryPrice) {
+            // Closing long position: profit if price went up
+            pnl = roundTo8((price - state.entryPrice) * state.position);
+            state.dailyPnL = roundTo8(state.dailyPnL + pnl);
+        }
+
+        // Update paper balance
+        state.paperBalance = roundTo8(state.paperBalance + tradeValue);
+
+        // Update position tracking
+        if (state.position > 0) {
+            // Closing long position
+            state.position = 0;
+            state.entryPrice = undefined;
+            state.isLongPosition = undefined;
+        } else {
+            // Opening short position
+            state.position = roundTo8(state.position - quantity);
+            state.entryPrice = price;
+            state.isLongPosition = false;
         }
 
         // Record the paper trade

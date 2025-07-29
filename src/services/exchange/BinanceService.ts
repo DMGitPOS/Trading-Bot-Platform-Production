@@ -33,6 +33,17 @@ export class BinanceService implements ExchangeService {
         }
     }
 
+    // Helper method to transform symbols for different API endpoints
+    private transformSymbol(symbol: string, forFutures: boolean = false): string {
+        if (forFutures) {
+            // Remove .P suffix for futures API calls
+            return symbol.replace(/\.P$/, '');
+        } else {
+            // Keep original symbol for spot API calls
+            return symbol;
+        }
+    }
+
     getExchangeName(): string {
         return 'binance';
     }
@@ -64,15 +75,39 @@ export class BinanceService implements ExchangeService {
     ): Promise<Candle[]> {
         try {
             const binanceInterval = this.mapInterval(interval);
-            const klines: any[] = await this.client.uiklines(symbol, binanceInterval, { limit });
-            return klines.map((kline: any[]): Candle => ({
-                time: kline[0],
-                open: parseFloat(kline[1]),
-                high: parseFloat(kline[2]),
-                low: parseFloat(kline[3]),
-                close: parseFloat(kline[4]),
-                volume: parseFloat(kline[5]),
-            }));
+            const isFuturesSymbol = symbol.endsWith('.P');
+            
+            if (isFuturesSymbol) {
+                // Use futures API for futures data
+                const transformedSymbol = this.transformSymbol(symbol, true);
+                const response = await axios.get(`${this.futuresBaseUrl}/fapi/v1/klines`, {
+                    params: {
+                        symbol: transformedSymbol,
+                        interval: binanceInterval,
+                        limit
+                    }
+                });
+                const klines: any[] = response.data as any[];
+                return klines.map((kline: any[]): Candle => ({
+                    time: kline[0],
+                    open: parseFloat(kline[1]),
+                    high: parseFloat(kline[2]),
+                    low: parseFloat(kline[3]),
+                    close: parseFloat(kline[4]),
+                    volume: parseFloat(kline[5]),
+                }));
+            } else {
+                // Use spot API for spot data
+                const klines: any[] = await this.client.uiklines(symbol, binanceInterval, { limit });
+                return klines.map((kline: any[]): Candle => ({
+                    time: kline[0],
+                    open: parseFloat(kline[1]),
+                    high: parseFloat(kline[2]),
+                    low: parseFloat(kline[3]),
+                    close: parseFloat(kline[4]),
+                    volume: parseFloat(kline[5]),
+                }));
+            }
         } catch (error) {
             console.error('Error in fetchKlines:', error);
             throw error;
@@ -80,30 +115,71 @@ export class BinanceService implements ExchangeService {
     }
 
     async placeOrder(request: OrderRequest): Promise<OrderResponse> {
-        const order: any = await this.client.newOrder(
-            request.symbol,
-            request.side.toUpperCase() as any,
-            request.type.toUpperCase() as any,
-            {
+        // Check if this is a futures symbol (has .P suffix)
+        const isFuturesSymbol = request.symbol.endsWith('.P');
+        
+        if (isFuturesSymbol) {
+            // Use futures API for futures orders
+            const transformedSymbol = this.transformSymbol(request.symbol, true);
+            const params = {
+                symbol: transformedSymbol,
+                side: request.side.toUpperCase(),
+                type: request.type.toUpperCase(),
                 quantity: request.quantity,
-                price: request.price,
-            }
-        );
-        return {
-            id: order.orderId?.toString() || '',
-            symbol: order.symbol || request.symbol,
-            side: (order.side?.toLowerCase() as 'buy' | 'sell') || request.side,
-            type: (order.type?.toLowerCase() as 'market' | 'limit') || request.type,
-            quantity: parseFloat(order.origQty || '0'),
-            price: parseFloat(order.price || '0'),
-            status: this.mapOrderStatus(order.status || 'NEW'),
-            timestamp: Date.now(),
-        };
+                ...(request.price && { price: request.price }),
+            };
+            
+            const order: any = await this.sendFuturesPostRequest('/fapi/v1/order', params);
+            return {
+                id: order.orderId?.toString() || '',
+                symbol: order.symbol + '.P' || request.symbol, // Add .P suffix back
+                side: (order.side?.toLowerCase() as 'buy' | 'sell') || request.side,
+                type: (order.type?.toLowerCase() as 'market' | 'limit') || request.type,
+                quantity: parseFloat(order.origQty || '0'),
+                price: parseFloat(order.price || '0'),
+                status: this.mapOrderStatus(order.status || 'NEW'),
+                timestamp: Date.now(),
+            };
+        } else {
+            // Use spot API for spot orders
+            const order: any = await this.client.newOrder(
+                request.symbol,
+                request.side.toUpperCase() as any,
+                request.type.toUpperCase() as any,
+                {
+                    quantity: request.quantity,
+                    price: request.price,
+                }
+            );
+            return {
+                id: order.orderId?.toString() || '',
+                symbol: order.symbol || request.symbol,
+                side: (order.side?.toLowerCase() as 'buy' | 'sell') || request.side,
+                type: (order.type?.toLowerCase() as 'market' | 'limit') || request.type,
+                quantity: parseFloat(order.origQty || '0'),
+                price: parseFloat(order.price || '0'),
+                status: this.mapOrderStatus(order.status || 'NEW'),
+                timestamp: Date.now(),
+            };
+        }
     }
 
     async cancelOrder(symbol: string, orderId: string): Promise<boolean> {
         try {
-            await this.client.cancelOrder(symbol, { orderId: parseInt(orderId) });
+            const isFuturesSymbol = symbol.endsWith('.P');
+            
+            if (isFuturesSymbol) {
+                // Use futures API for futures orders
+                const transformedSymbol = this.transformSymbol(symbol, true);
+                const params = {
+                    symbol: transformedSymbol,
+                    orderId: parseInt(orderId),
+                };
+                await this.sendFuturesPostRequest('/fapi/v1/order', params);
+            } else {
+                // Use spot API for spot orders
+                await this.client.cancelOrder(symbol, { orderId: parseInt(orderId) });
+            }
             return true;
         } catch (error) {
             console.error('Error cancelling order:', error);
@@ -112,17 +188,39 @@ export class BinanceService implements ExchangeService {
     }
 
     async getOrder(symbol: string, orderId: string): Promise<OrderResponse> {
-        const order: any = await this.client.getOrder(symbol, { orderId: parseInt(orderId) });
-        return {
-            id: order.orderId?.toString() || orderId,
-            symbol: order.symbol || symbol,
-            side: (order.side?.toLowerCase() as 'buy' | 'sell') || 'buy',
-            type: (order.type?.toLowerCase() as 'market' | 'limit') || 'market',
-            quantity: parseFloat(order.origQty || '0'),
-            price: parseFloat(order.price || '0'),
-            status: this.mapOrderStatus(order.status || 'NEW'),
-            timestamp: order.time || Date.now(),
-        };
+        const isFuturesSymbol = symbol.endsWith('.P');
+        
+        if (isFuturesSymbol) {
+            // Use futures API for futures orders
+            const transformedSymbol = this.transformSymbol(symbol, true);
+            const order: any = await this.sendFuturesRequest('/fapi/v1/order', { 
+                symbol: transformedSymbol, 
+                orderId: parseInt(orderId) 
+            });
+            return {
+                id: order.orderId?.toString() || orderId,
+                symbol: order.symbol + '.P' || symbol, // Add .P suffix back
+                side: (order.side?.toLowerCase() as 'buy' | 'sell') || 'buy',
+                type: (order.type?.toLowerCase() as 'market' | 'limit') || 'market',
+                quantity: parseFloat(order.origQty || '0'),
+                price: parseFloat(order.price || '0'),
+                status: this.mapOrderStatus(order.status || 'NEW'),
+                timestamp: order.time || Date.now(),
+            };
+        } else {
+            // Use spot API for spot orders
+            const order: any = await this.client.getOrder(symbol, { orderId: parseInt(orderId) });
+            return {
+                id: order.orderId?.toString() || orderId,
+                symbol: order.symbol || symbol,
+                side: (order.side?.toLowerCase() as 'buy' | 'sell') || 'buy',
+                type: (order.type?.toLowerCase() as 'market' | 'limit') || 'market',
+                quantity: parseFloat(order.origQty || '0'),
+                price: parseFloat(order.price || '0'),
+                status: this.mapOrderStatus(order.status || 'NEW'),
+                timestamp: order.time || Date.now(),
+            };
+        }
     }
 
     async getBalance(asset?: string): Promise<Balance[]> {
@@ -160,7 +258,7 @@ export class BinanceService implements ExchangeService {
         return data
             .filter((pos: any) => parseFloat(pos.positionAmt) !== 0)
             .map((pos: any): FuturesPosition => ({
-                symbol: pos.symbol,
+                symbol: pos.symbol + '.P', // Add .P suffix for consistency with frontend
                 positionAmt: parseFloat(pos.positionAmt),
                 entryPrice: parseFloat(pos.entryPrice),
                 markPrice: parseFloat(pos.markPrice),
@@ -179,7 +277,8 @@ export class BinanceService implements ExchangeService {
     }
 
     async getLeverage(symbol: string): Promise<number> {
-        const data: any[] = await this.sendFuturesRequest('/fapi/v2/positionRisk', { symbol });
+        const transformedSymbol = this.transformSymbol(symbol, true);
+        const data: any[] = await this.sendFuturesRequest('/fapi/v2/positionRisk', { symbol: transformedSymbol });
         if (Array.isArray(data) && data.length > 0) {
             return parseFloat(data[0].leverage);
         }
@@ -187,15 +286,17 @@ export class BinanceService implements ExchangeService {
     }
 
     async setLeverage(symbol: string, leverage: number): Promise<boolean> {
-        const data: any = await this.sendFuturesPostRequest('/fapi/v1/leverage', { symbol, leverage });
+        const transformedSymbol = this.transformSymbol(symbol, true);
+        const data: any = await this.sendFuturesPostRequest('/fapi/v1/leverage', { symbol: transformedSymbol, leverage });
         return data && data.leverage === leverage;
     }
 
     async getFundingRate(symbol: string): Promise<{ symbol: string; fundingRate: number; nextFundingTime: number }> {
-        const data: any[] = await this.sendFuturesRequest('/fapi/v1/fundingRate', { symbol, limit: 1 });
+        const transformedSymbol = this.transformSymbol(symbol, true);
+        const data: any[] = await this.sendFuturesRequest('/fapi/v1/fundingRate', { symbol: transformedSymbol, limit: 1 });
         if (Array.isArray(data) && data.length > 0) {
             return {
-                symbol: data[0].symbol,
+                symbol: data[0].symbol + '.P', // Add .P suffix for consistency
                 fundingRate: parseFloat(data[0].fundingRate),
                 nextFundingTime: data[0].fundingTime,
             };
@@ -208,8 +309,9 @@ export class BinanceService implements ExchangeService {
         if (!position || position.positionAmt === 0) return false;
         const side: string = position.positionAmt > 0 ? 'SELL' : 'BUY';
         const quantity: number = Math.abs(position.positionAmt);
+        const transformedSymbol = this.transformSymbol(symbol, true);
         const params = {
-            symbol,
+            symbol: transformedSymbol,
             side,
             type: 'MARKET',
             quantity,
