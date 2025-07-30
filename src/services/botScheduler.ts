@@ -15,8 +15,8 @@ export async function startBotJob(botId: string) {
     if (!bot) throw new Error('Bot not found');
     const apiKey = await ApiKey.findById(bot.apiKeyRef) as IApiKey;
     if (!apiKey) throw new Error('API key not found');
-    // Schedule job every minute
-    const task = cron.schedule('* * * * *', async () => {
+    // Schedule job every 3 minutes to match 3-minute timeframe
+    const task = cron.schedule('*/3 * * * *', async () => {
         try {
             await runBot(bot, apiKey);
             // Log successful run

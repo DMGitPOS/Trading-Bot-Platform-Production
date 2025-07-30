@@ -159,6 +159,7 @@ export const verify2FA = async (
                 subscriptionPlan: user.subscriptionPlan,
                 hasPassword: !!user.password,
                 twoFAEnabled: user.twoFAEnabled,
+                manualSubscription: user.manualSubscription
             },
         });
     } catch (error) {
@@ -264,6 +265,7 @@ export const verifyBackupCode = async (
                 subscriptionPlan: user.subscriptionPlan,
                 hasPassword: !!user.password,
                 twoFAEnabled: user.twoFAEnabled,
+                manualSubscription: user.manualSubscription
             },
         });
     } catch (error) {

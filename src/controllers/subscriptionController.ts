@@ -86,7 +86,6 @@ export const handleWebhook = async (req: Request, res: Response) => {
                     {
                         subscriptionStatus: status === 'active' || status === 'trialing' ? 'active' : status,
                         subscriptionPlan: planMap[priceId] || 'Unknown',
-                        manualSubscription: false,
                     },
                     { new: true }
                 );
@@ -124,7 +123,6 @@ export const handleWebhook = async (req: Request, res: Response) => {
                     {
                         subscriptionStatus: 'inactive',
                         subscriptionPlan: 'Free',
-                        manualSubscription: false,
                     },
                     { new: true }
                 );
@@ -139,7 +137,7 @@ export const handleWebhook = async (req: Request, res: Response) => {
                 const invoice = event.data.object as Stripe.Invoice;
                 const updatedUser = await User.findOneAndUpdate(
                     { stripeCustomerId: invoice.customer as string },
-                    { subscriptionStatus: 'past_due', manualSubscription: false },
+                    { subscriptionStatus: 'past_due' },
                     { new: true }
                 );
                 if (!updatedUser) {

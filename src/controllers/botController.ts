@@ -40,6 +40,44 @@ const createBotSchema = Joi.object({
     useTestnet: Joi.boolean().optional(),
     testnetApiKeyRef: Joi.string().optional(),
     mode: Joi.string().valid('auto', 'manual').default('auto'),
+    // Enhanced features
+    volatilityConfig: Joi.object({
+        enabled: Joi.boolean().default(false),
+        atrPeriod: Joi.number().integer().min(5).max(50).default(14),
+        lowVolatilityThreshold: Joi.number().min(0.1).default(0.5),
+        highVolatilityThreshold: Joi.number().min(0.5).default(2.0),
+        lowVolStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(5),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+        highVolStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(5),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+        normalStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(10),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+    }).optional(),
+    drawdownConfig: Joi.object({
+        enabled: Joi.boolean().default(false),
+        maxDrawdown: Joi.number().min(1).max(50).default(10),
+        trailingStop: Joi.boolean().default(false),
+        trailingStopDistance: Joi.number().min(1).max(20).default(5),
+    }).optional(),
+    confirmationSignals: Joi.object({
+        useRSI: Joi.boolean().default(false),
+        rsiPeriod: Joi.number().integer().min(5).max(30).default(14),
+        rsiOverbought: Joi.number().min(60).max(90).default(70),
+        rsiOversold: Joi.number().min(10).max(40).default(30),
+        useVolume: Joi.boolean().default(false),
+        volumeThreshold: Joi.number().min(0.5).default(1.2),
+        useTrendStrength: Joi.boolean().default(false),
+        minTrendStrength: Joi.number().min(0.1).default(0.5),
+    }).optional(),
 });
 
 const updateBotSchema = Joi.object({
@@ -62,6 +100,44 @@ const updateBotSchema = Joi.object({
     useTestnet: Joi.boolean().optional(),
     testnetApiKeyRef: Joi.string().optional(),
     mode: Joi.string().valid('auto', 'manual').optional(),
+    // Enhanced features
+    volatilityConfig: Joi.object({
+        enabled: Joi.boolean().default(false),
+        atrPeriod: Joi.number().integer().min(5).max(50).default(14),
+        lowVolatilityThreshold: Joi.number().min(0.1).default(0.5),
+        highVolatilityThreshold: Joi.number().min(0.5).default(2.0),
+        lowVolStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(5),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+        highVolStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(5),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+        normalStrategy: Joi.object({
+            shortPeriod: Joi.number().integer().min(1).default(10),
+            longPeriod: Joi.number().integer().min(1).default(20),
+            quantity: Joi.number().positive().default(1),
+        }).default(),
+    }).optional(),
+    drawdownConfig: Joi.object({
+        enabled: Joi.boolean().default(false),
+        maxDrawdown: Joi.number().min(1).max(50).default(10),
+        trailingStop: Joi.boolean().default(false),
+        trailingStopDistance: Joi.number().min(1).max(20).default(5),
+    }).optional(),
+    confirmationSignals: Joi.object({
+        useRSI: Joi.boolean().default(false),
+        rsiPeriod: Joi.number().integer().min(5).max(30).default(14),
+        rsiOverbought: Joi.number().min(60).max(90).default(70),
+        rsiOversold: Joi.number().min(10).max(40).default(30),
+        useVolume: Joi.boolean().default(false),
+        volumeThreshold: Joi.number().min(0.5).default(1.2),
+        useTrendStrength: Joi.boolean().default(false),
+        minTrendStrength: Joi.number().min(0.1).default(0.5),
+    }).optional(),
 });
 
 const updatePaperTradingConfigSchema = Joi.object({
@@ -270,7 +346,19 @@ export const createBot = async (req: Request, res: Response) => {
         if (!strategy || typeof strategy !== 'object' || !strategy.type) {
             return res.status(400).json({ error: 'Strategy is required and must have a type.' });
         }
-        if (strategy.type === 'config') {
+        
+        // Check if it's a custom strategy (by ID)
+        if (strategy.type && strategy.type !== 'moving_average' && strategy.type !== 'rsi' && strategy.type !== 'config') {
+            // This might be a strategy ID - validate it exists
+            const strategyDoc = await Strategy.findById(strategy.type);
+            if (!strategyDoc) {
+                return res.status(400).json({ error: 'Invalid strategy ID or type.' });
+            }
+            // For custom strategies, we need parameters
+            if (!strategy.parameters || typeof strategy.parameters !== 'object') {
+                return res.status(400).json({ error: 'Strategy parameters are required for custom strategies.' });
+            }
+        } else if (strategy.type === 'config') {
             // Must provide config with indicators and rules arrays
             if (!strategy.config || typeof strategy.config !== 'object') {
                 return res.status(400).json({ error: 'Config strategy must include a config object.' });
@@ -288,8 +376,12 @@ export const createBot = async (req: Request, res: Response) => {
                 if (!symbol || !shortPeriod || !longPeriod || !quantity) {
                     return res.status(400).json({ error: 'Missing required strategy parameters: symbol, shortPeriod, longPeriod, quantity' });
                 }
+            } else if (strategy.type === 'rsi') {
+                const { symbol, period, overbought, oversold, quantity } = strategy.parameters;
+                if (!symbol || !period || !overbought || !oversold || !quantity) {
+                    return res.status(400).json({ error: 'Missing required strategy parameters: symbol, period, overbought, oversold, quantity' });
+                }
             }
-            // Add more built-in strategy validations as needed
         }
         // --- END STRATEGY VALIDATION ---
 
@@ -308,8 +400,8 @@ export const createBot = async (req: Request, res: Response) => {
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: 'User not found' });
   
-        if (user.subscriptionStatus !== 'active') {
-             return res.status(403).json({ error: 'You must have an active subscription to create a bot.' });
+        if (user.subscriptionStatus !== 'active' && (!user.manualSubscription.active || !user.manualSubscription.expiresAt || (user.manualSubscription.expiresAt && new Date(user.manualSubscription.expiresAt) < new Date()))) {
+            return res.status(403).json({ error: 'You must have an active subscription to create a bot.' });
         }
 
         const apiKey = await ApiKey.findOne({ _id: apiKeyRef, user: userId });
@@ -323,7 +415,11 @@ export const createBot = async (req: Request, res: Response) => {
         }
 
         if (!user.subscriptionPlan || user.subscriptionPlan === 'Unknown' || user.subscriptionPlan === 'Free') {
-            return res.status(403).json({ error: 'You must have a paid subscription to create a bot.' });
+            if (botCount >= user.manualSubscription.activeBots) {
+                return res.status(403).json({ error: 'You have reached the maximum number of bots for your subscription.' });
+            } else if (!user.manualSubscription.active) {
+                return res.status(403).json({ error: 'You must have a paid subscription to create a bot.' });
+            }
         }
         if (user.subscriptionPlan === 'Basic' && botCount >= 2) {
             return res.status(403).json({ error: 'Basic plan allows up to 2 bots.' });
@@ -353,6 +449,10 @@ export const createBot = async (req: Request, res: Response) => {
             useTestnet: useTestnet || false,
             testnetApiKeyRef: testnetApiKeyRef || undefined,
             mode: mode || 'auto',
+            // Enhanced features
+            volatilityConfig: req.body.volatilityConfig,
+            drawdownConfig: req.body.drawdownConfig,
+            confirmationSignals: req.body.confirmationSignals,
         });
         await bot.save();
         res.status(201).json(bot);
@@ -409,7 +509,19 @@ export const updateBot = async (req: Request, res: Response) => {
             if (!strategy.type) {
                 return res.status(400).json({ error: 'Strategy type is required.' });
             }
-            if (strategy.type === 'config') {
+            
+            // Check if it's a custom strategy (by ID)
+            if (strategy.type && strategy.type !== 'moving_average' && strategy.type !== 'rsi' && strategy.type !== 'config') {
+                // This might be a strategy ID - validate it exists
+                const strategyDoc = await Strategy.findById(strategy.type);
+                if (!strategyDoc) {
+                    return res.status(400).json({ error: 'Invalid strategy ID or type.' });
+                }
+                // For custom strategies, we need parameters
+                if (!strategy.parameters || typeof strategy.parameters !== 'object') {
+                    return res.status(400).json({ error: 'Strategy parameters are required for custom strategies.' });
+                }
+            } else if (strategy.type === 'config') {
                 if (!strategy.config || typeof strategy.config !== 'object') {
                     return res.status(400).json({ error: 'Config strategy must include a config object.' });
                 }
@@ -425,8 +537,12 @@ export const updateBot = async (req: Request, res: Response) => {
                     if (!symbol || !shortPeriod || !longPeriod || !quantity) {
                         return res.status(400).json({ error: 'Missing required strategy parameters: symbol, shortPeriod, longPeriod, quantity' });
                     }
+                } else if (strategy.type === 'rsi') {
+                    const { symbol, period, overbought, oversold, quantity } = strategy.parameters;
+                    if (!symbol || !period || !overbought || !oversold || !quantity) {
+                        return res.status(400).json({ error: 'Missing required strategy parameters: symbol, period, overbought, oversold, quantity' });
+                    }
                 }
-                // Add more built-in strategy validations as needed
             }
         }
         // --- END STRATEGY VALIDATION ---
@@ -466,6 +582,10 @@ export const updateBot = async (req: Request, res: Response) => {
         if (useTestnet !== undefined) bot.useTestnet = useTestnet;
         if (testnetApiKeyRef !== undefined) bot.testnetApiKeyRef = testnetApiKeyRef;
         if (mode !== undefined) bot.mode = mode;
+        // Enhanced features
+        if (req.body.volatilityConfig !== undefined) bot.volatilityConfig = req.body.volatilityConfig;
+        if (req.body.drawdownConfig !== undefined) bot.drawdownConfig = req.body.drawdownConfig;
+        if (req.body.confirmationSignals !== undefined) bot.confirmationSignals = req.body.confirmationSignals;
         
         await bot.save();
         res.status(201).json(bot);
