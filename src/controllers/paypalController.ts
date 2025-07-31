@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import paypal from "paypal-rest-sdk";
 import Joi from 'joi';
 import User from "../models/User";
+import Subscription from "../models/Subscription";
 import { AuthRequest } from "../middleware/auth";
 
 // Configure PayPal SDK
@@ -11,19 +12,18 @@ paypal.configure({
     client_secret: process.env.PAYPAL_CLIENT_SECRET || "",
 });
 
-const planMap: { [key: string]: { name: string; price: string } } = {
-    Basic: { name: "Basic Plan", price: "15.00" },
-    Premium: { name: "Premium Plan", price: "30.00" },
-};
-
 const createPaymentSchema = Joi.object({
-    plan: Joi.string().valid('Basic', 'Premium').required(),
+    priceAmount: Joi.number().positive().required(),
+    currency: Joi.string().default('USD'),
+    interval: Joi.string().valid('month', 'year').default('month'),
 });
 
 const executePaymentSchema = Joi.object({
     paymentId: Joi.string().required(),
     PayerID: Joi.string().required(),
-    plan: Joi.string().valid('Basic', 'Premium').required(),
+    priceAmount: Joi.number().positive().required(),
+    currency: Joi.string().default('USD'),
+    interval: Joi.string().valid('month', 'year').default('month'),
 });
 
 export const createPayment = async (req: Request, res: Response) => {
@@ -31,13 +31,15 @@ export const createPayment = async (req: Request, res: Response) => {
         const { error } = createPaymentSchema.validate(req.body);
         if (error) return res.status(400).json({ error: error.details[0].message });
 
-        const { plan } = req.body;
+        const { priceAmount, currency = 'USD', interval = 'month' } = req.body;
         const userId = (req as AuthRequest).user?.id;
         if (!userId) return res.status(401).json({ error: 'Not authorized' });
 
-        if (!planMap[plan]) return res.status(400).json({ error: "Invalid plan" });
+        const user = await User.findById(userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
-        const { name, price } = planMap[plan];
+        const priceString = priceAmount.toFixed(2);
+        const planName = `Custom ${interval}ly subscription`;
 
         const payment = {
             intent: "sale",
@@ -51,19 +53,19 @@ export const createPayment = async (req: Request, res: Response) => {
                     item_list: {
                         items: [
                             {
-                                name,
-                                sku: plan,
-                                price,
-                                currency: "USD",
+                                name: planName,
+                                sku: `custom-${interval}-${priceAmount}`,
+                                price: priceString,
+                                currency: currency,
                                 quantity: 1,
                             },
                         ],
                     },
                     amount: {
-                        currency: "USD",
-                        total: price,
+                        currency: currency,
+                        total: priceString,
                     },
-                    description: `Subscription payment for ${name}`,
+                    description: `Subscription payment for ${planName}`,
                 },
             ],
         };
@@ -91,22 +93,20 @@ export const executePayment = async (req: Request, res: Response) => {
         const { error } = executePaymentSchema.validate(req.body);
         if (error) return res.status(400).json({ error: error.details[0].message });
 
-        const { paymentId, PayerID, plan } = req.body;
+        const { paymentId, PayerID, priceAmount, currency = 'USD', interval = 'month' } = req.body;
 
         const userId = (req as AuthRequest).user?.id;
         if (!userId) return res.status(401).json({ error: 'Not authorized' });
 
-        if (!planMap[plan]) return res.status(400).json({ error: "Invalid plan" });
-
-        const { price } = planMap[plan];
+        const priceString = priceAmount.toFixed(2);
 
         const execute_payment_json = {
             payer_id: PayerID,
             transactions: [
             {
                 amount: {
-                    currency: "USD",
-                    total: price,
+                    currency: currency,
+                    total: priceString,
                 },
             },
             ],
@@ -117,9 +117,17 @@ export const executePayment = async (req: Request, res: Response) => {
                 res.status(500).json({ error: "PayPal payment execution failed" });
             } else {
                 // Mark user as subscribed to the plan
+                let subscriptionPlan: 'Free' | 'Basic' | 'Premium' = 'Free';
+
+                const planMap = await Subscription.findOne({ price: priceAmount });
+                if (planMap?.plan) {
+                    subscriptionPlan = planMap.plan;
+                }
+
                 await User.findByIdAndUpdate(userId, {
                     subscriptionStatus: "active",
-                    subscriptionPlan: plan.charAt(0).toUpperCase() + plan.slice(1),
+                    subscriptionPlan: subscriptionPlan,
+                    subscriptionPrice: priceAmount,
                 });
                 res.status(201).json({ success: true });
             }

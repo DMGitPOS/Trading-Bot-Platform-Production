@@ -96,7 +96,7 @@ export const addSubscription = async (req: Request, res: Response) => {
         user.manualSubscription.active = true;
         await user.save();
         
-        res.json({ success: true });
+        res.json(user);
     } catch (error) {
         res.status(500).json({ error: 'Add subscription failed' });
     }
@@ -113,7 +113,7 @@ export const removeSubscription = async (req: Request, res: Response) => {
         user.manualSubscription.activeBots = 0;
         await user.save();
         
-        res.json({ success: true });
+        res.json(user);
     } catch (error) {
         res.status(500).json({ error: 'Remove subscription failed' });
     }

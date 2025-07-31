@@ -414,7 +414,7 @@ export const createBot = async (req: Request, res: Response) => {
             return res.status(403).json({ error: 'Basic plan allows up to 2 bots.' });
         }
 
-        if (!user.subscriptionPlan || user.subscriptionPlan === 'Unknown' || user.subscriptionPlan === 'Free') {
+        if (!user.subscriptionPlan || user.subscriptionPlan === 'Free') {
             if (botCount >= user.manualSubscription.activeBots) {
                 return res.status(403).json({ error: 'You have reached the maximum number of bots for your subscription.' });
             } else if (!user.manualSubscription.active) {

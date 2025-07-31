@@ -20,7 +20,10 @@ export interface IUser extends Document {
     backupCodes?: string[];
     tempSecret?: string;
     subscriptionStatus?: 'active' | 'inactive' | 'trialing' | 'past_due';
-    subscriptionPlan?: 'Free' | 'Basic' | 'Premium' | 'Unknown';
+    subscriptionPlan?: 'Free' | 'Basic' | 'Premium';
+    subscriptionPrice?: number;
+    subscriptionCurrency?: string;
+    subscriptionInterval?: string;
     stripeCustomerId?: string;
     referralCode: string;
     referredBy: mongoose.Types.ObjectId | null;
@@ -87,6 +90,9 @@ const UserSchema: Schema = new Schema<IUser>({
     tempSecret: { type: String },
     subscriptionStatus: { type: String, default: 'inactive' },
     subscriptionPlan: { type: String, default: 'Free' },
+    subscriptionPrice: { type: Number, default: 0 },
+    subscriptionCurrency: { type: String, default: 'USD' },
+    subscriptionInterval: { type: String, default: 'month' },
     stripeCustomerId: { type: String },
     referralCode: {
         type: String,

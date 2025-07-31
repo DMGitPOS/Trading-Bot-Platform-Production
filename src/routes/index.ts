@@ -1,7 +1,8 @@
 import express from 'express';
 import authRoutes from './auth.routes';
 import apiKeyRoutes from './apiKeys.routes';
-import subscriptionRoutes from './stripe.routes';
+import stripeRoutes from './stripe.routes';
+import subscriptionModelRoutes from './subscription.routes';
 import botsRoutes from './bots.routes';
 import paypalRoutes from './paypal.routes';
 import supportTicketRoutes from './supportTickets.routes';
@@ -16,7 +17,8 @@ const router = express.Router();
 
 router.use('/auth', authRoutes);
 router.use('/keys', apiKeyRoutes);
-router.use('/subscription', subscriptionRoutes);
+router.use('/stripe', stripeRoutes);
+router.use('/subscriptions', subscriptionModelRoutes);
 router.use('/bots', botsRoutes);
 router.use('/paypal', paypalRoutes);
 router.use('/support', supportTicketRoutes);

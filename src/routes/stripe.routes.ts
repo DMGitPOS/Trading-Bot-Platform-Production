@@ -5,7 +5,7 @@ import {
     createPortalSession,
     getSubscriptionAnalytics,
     getRecentSubscriptions
-} from '../controllers/subscriptionController';
+} from '../controllers/stripeController';
 import { authenticateJWT, isAdmin } from '../middleware/auth';
 
 const router = express.Router();
